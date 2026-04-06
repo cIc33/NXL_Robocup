@@ -1,0 +1,7 @@
+arm_gui:
+  ros_parameters:
+    presets:
+
+      HOME: [0.0 , 30.0, -130.0, 25.0]
+      CALIBRATION: [0.0 , 0.0 , 0.0 , 0.0]
+      ATACK: [0.0, 45.0 , -45.0, 0.0]

@@ -1,0 +1,23 @@
+ros parameter:
+  arm_parameter:
+
+    robot_dimensions:
+      L_base: 135.0
+      L_shoulder: 155.0
+      L_elbow: 131.0
+      L_wrist: 190.0
+
+    motion_parameters:
+      vel_manual: 10
+      tolerance: 4.0
+
+    gripper_positions:
+      g1_open: -40
+      g1_close: 0
+
+    presets_arm:
+      presets_names: [home, calibration, attack]
+      prests.home:  [0.0, -30.0, -140.0, -20.0]
+      prests.calibration: [0, 0, 0, 0]
+      prests.attack: [0.0, 45.0, -45.0, 0.0]
+

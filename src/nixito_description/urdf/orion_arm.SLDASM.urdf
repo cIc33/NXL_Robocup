@@ -1,0 +1,351 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot
+  name="orion_arm">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="0.00087009 -0.0021944 0.029644"
+        rpy="0 0 0" />
+      <mass
+        value="0.11638" />
+      <inertia
+        ixx="0.00011727"
+        ixy="-1.4559E-07"   
+        ixz="-1.3229E-07"
+        iyy="0.00013258"
+        iyz="-1.2447E-06"
+        izz="0.00012533" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+         filename="package://nixito_description/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+        filename="package://nixito_description/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="Hombro_Link">
+    <inertial>
+      <origin
+        xyz="0.0061122 -0.00030648 0.043274"
+        rpy="0 0 0" />
+      <mass
+        value="0.071294" />
+      <inertia
+        ixx="7.5104E-05"
+        ixy="-5.5616E-07"
+        ixz="-1.4267E-05"
+        iyy="8.3517E-05"
+        iyz="3.3622E-07"
+        izz="5.5769E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://nixito_description/meshes/Hombro_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://nixito_description/meshes/Hombro_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Hombro_joint"
+    type="revolute">
+    <origin
+      xyz="0.00056836 0.00069114 0.0745"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="Hombro_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-3.14159"
+      upper="3.14159"
+      effort="100"
+      velocity="100" />
+    <dynamics
+      damping="0.1"
+      friction="0.1" />
+  </joint>
+  <link
+    name="E1_link">
+    <inertial>
+      <origin
+        xyz="5.8647E-07 0.089772 0.016629"
+        rpy="0 0 0" />
+      <mass
+        value="0.21336" />
+      <inertia
+        ixx="0.00067737"
+        ixy="-5.3208E-09"
+        ixz="3.5058E-10"
+        iyy="9.0509E-05"
+        iyz="-6.9262E-06"
+        izz="0.00070582" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+         filename="package://nixito_description/meshes/E1_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://nixito_description/meshes/E1_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="E1_joint"
+    type="revolute">
+    <origin
+      xyz="0.035 0 0.061"
+      rpy="1.5708 0 1.5708" />
+    <parent
+      link="Hombro_Link" />
+    <child
+      link="E1_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-3.14159"
+      upper="3.14159"
+      effort="100"
+      velocity="100" />
+    <dynamics
+      damping="0.1"
+      friction="0.1" />
+  </joint>
+  <link
+    name="E2_link">
+    <inertial>
+      <origin
+        xyz="-8.9604E-08 -0.075083 0.017946"
+        rpy="0 0 0" />
+      <mass
+        value="0.13423" />
+      <inertia
+        ixx="0.00033484"
+        ixy="-7.0719E-09"
+        ixz="-1.488E-09"
+        iyy="5.5038E-05"
+        iyz="-2.0822E-06"
+        izz="0.00035842" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+        filename="package://nixito_description/meshes/E2_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://nixito_description/meshes/E2_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="E2_joint"
+    type="revolute">
+    <origin
+      xyz="0 0.155 -0.002"
+      rpy="3.1416 0 0" />
+    <parent
+      link="E1_link" />
+    <child
+      link="E2_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-3.14159"
+      upper="3.14159"
+      effort="100"
+      velocity="100" />
+    <dynamics
+      damping="0.1"
+      friction="0.1" />
+  </joint>
+  <link
+    name="E3_link">
+    <inertial>
+      <origin
+        xyz="-0.0057567 0.037472 0.01681"
+        rpy="0 0 0" />
+      <mass
+        value="0.096563" />
+      <inertia
+        ixx="8.9557E-05"
+        ixy="1.2884E-05"
+        ixz="-7.7087E-07"
+        iyy="4.8651E-05"
+        iyz="3.2009E-06"
+        izz="0.00010318" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+       filename="package://nixito_description/meshes/E3_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://nixito_description/meshes/E3_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="E3_joint"
+    type="revolute">
+    <origin
+      xyz="0 -0.131 0"
+      rpy="-3.1416 0 0" />
+    <parent
+      link="E2_link" />
+    <child
+      link="E3_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-3.14159"
+      upper="3.14159"
+      effort="100"
+      velocity="100" />
+    <dynamics
+      damping="0.1"
+      friction="0.1" />
+  </joint>
+  <link
+    name="Gripper_Link">
+    <inertial>
+      <origin
+        xyz="0.00061125 0.0034889 -0.0026919"
+        rpy="0 0 0" />
+      <mass
+        value="0.05432" />
+      <inertia
+        ixx="1.16E-05"
+        ixy="-1.1428E-08"
+        ixz="1.167E-08"
+        iyy="1.8982E-05"
+        iyz="-9.1596E-07"
+        izz="9.5686E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://nixito_description/meshes/Gripper_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.78039 0.76078 0.74118 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+         filename="package://nixito_description/meshes/Gripper_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Gripper_joint"
+    type="fixed">
+    <origin
+      xyz="-0.0045 0.14335 0.0254"
+      rpy="1.5708 -1.5708 0" />
+    <parent
+      link="E3_link" />
+    <child
+      link="Gripper_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.5708"
+      upper="1.5708"
+      effort="100"
+      velocity="100" />
+    <dynamics
+      damping="0.1"
+      friction="0.1" />
+  </joint>
+
+
+</robot>

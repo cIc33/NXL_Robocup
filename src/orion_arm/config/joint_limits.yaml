@@ -1,0 +1,17 @@
+
+orion_driver:
+  ros__parameters:
+    # PRESET 1: Default (full range)
+    # E1 (Base):     [-180°, 180°]  - Rotación completa
+    # E2 (Hombro):   [-90°, 90°]
+    # E3 (Codo):     [-90°, 90°]
+    # E4 (Muñeca):   [-90°, 90°]
+    joint_limits: [0.0, 0.0, -120.0, 120.0, -160.0, 140.0, -115.0, 100.0]
+
+    # PRESET 2: Restricted ranges (example for avoiding collisions)
+    # Uncomment and modify according to your robot's collision zones
+    # joint_limits: [-170.0, 170.0, -80.0, 80.0, -60.0, 60.0, -45.0, 45.0]
+
+    # PRESET 3: Safe working zone (if you need restricted movement)
+    # Uncomment and modify as needed
+    # joint_limits: [-90.0, 90.0, -45.0, 45.0, -30.0, 30.0, -30.0, 30.0]

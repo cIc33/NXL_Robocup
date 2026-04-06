@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot 
+ name="nixito">
+
+  <link name="virtual_link"/> 
+  
+  <joint name="virtual_joint" type="fixed">
+    <parent link="virtual_link"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="base_link">
+    <inertial>
+      <origin xyz="0.00178276856770637 0.00122102381173206 0.0914864951251875" rpy="0 0 0" />
+      <mass value="20.5822949653022" />
+      <inertia ixx="0.040262752362127" ixy="2.51415429910964E-05" ixz="-0.0014783985073386" iyy="0.272552278736942" iyz="4.59199383060198E-05" izz="0.286870084769854" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://nixito_description/meshes/base_link_nixito.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://nixito_description/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="tractionR_link">
+    <inertial>
+      <origin xyz="-5.8228E-06 1.6894E-06 -0.037532" rpy="0 0 0" />
+      <mass value="1.3329" />
+      <inertia ixx="0.0031409" ixy="-1.5663E-08" ixz="-7.1232E-07" iyy="0.0031408" iyz="2.0666E-07" izz="0.0048591" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://nixito_description/meshes/tractionR_link.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://nixito_description/meshes/tractionR_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="tractionR_joint" type="continuous">
+    <origin xyz="-0.29369 -0.22792 0.075" rpy="1.5708 0 0" />
+    <parent link="base_link" />
+    <child link="tractionR_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" velocity="100" />
+    <dynamics damping="0.1" friction="0.1" />
+  </joint>
+
+  <link name="tractionL_link">
+    <inertial>
+      <origin xyz="-5.1567E-06 3.1886E-06 -0.035532" rpy="0 0 0" />
+      <mass value="1.3329" />
+      <inertia ixx="0.0031408" ixy="-2.6182E-08" ixz="-6.3084E-07" iyy="0.0031408" iyz="3.9007E-07" izz="0.0048591" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://nixito_description/meshes/tractionL_link.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://nixito_description/meshes/tractionL_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="tractionL_joint" type="continuous">
+    <origin xyz="-0.29369 0.22608 0.075" rpy="1.5708 0 3.1416" />
+    <parent link="base_link" />
+    <child link="tractionL_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" velocity="100" />
+    <dynamics damping="0.1" friction="0.1" />
+  </joint>
+
+  <link name="flipperR_link">
+    <inertial>
+      <origin xyz="-0.088546 9.8981E-06 0.029165" rpy="0 0 0" />
+      <mass value="0.90457" />
+      <inertia ixx="0.0011791" ixy="-4.8774E-13" ixz="-1.7292E-06" iyy="0.009654" iyz="-8.4701E-07" izz="0.0099581" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://nixito_description/meshes/flipperR_link.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://nixito_description/meshes/flipperR_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="flipperR_joint" type="revolute">
+    <origin xyz="0.26931 -0.28737 0.075" rpy="-1.5708 0.033693 0" />
+    <parent link="base_link" />
+    <child link="flipperR_link" />
+    <axis xyz="0 0 -1" />
+    <limit lower="-3.1416" upper="3.1416" effort="100" velocity="100" />
+    <dynamics damping="0.1" friction="0.1" />
+  </joint>
+
+  <link name="flipperL_link">
+    <inertial>
+      <origin xyz="0.088358 0.0059303 -0.029131" rpy="0 0 0" />
+      <mass value="0.90457" />
+      <inertia ixx="0.0012172" ixy="-0.00056625" ixz="2.5704E-06" iyy="0.0096159" iyz="1.7252E-07" izz="0.0099581" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://nixito_description/meshes/flipperL_link.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://nixito_description/meshes/flipperL_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="flipperL_joint" type="revolute">
+    <origin xyz="0.26931 0.28753 0.075" rpy="1.5708 0 3.1416" />
+    <parent link="base_link" />
+    <child link="flipperL_link" />
+    <axis xyz="0 0 1" />
+    <limit lower="-3.1416" upper="3.1416" effort="100" velocity="100" />
+    <dynamics damping="0.1" friction="0.1" />
+  </joint>
+</robot>
