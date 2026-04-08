@@ -1,0 +1,12 @@
+ffplay /dev/video42
+sudo ./gopro webcam -i 172.23.197.51 -a -n -r "480"
+ping 172.23.197.51
+sudo ip link set enxbe7b134567eb up
+sudo ip addr add 172.23.197.100/24 dev enxbe7b134567eb
+
+
+
+
+
+lectura serial THS1
+sudo stty -F /dev/ttyTHS1 115200 raw -echo && sudo cat /dev/ttyTHS1
