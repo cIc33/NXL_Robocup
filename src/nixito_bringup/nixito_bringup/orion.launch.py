@@ -24,36 +24,16 @@ def generate_launch_description():
     robot_desc = robot_description_config.toxml()
 
     return LaunchDescription([
-        
-        # Publicador de estado del robot (TF)
-        Node(
-            package='robot_state_publisher',
-            executable='robot_state_publisher',
-            name='robot_state_publisher',
-            output='screen',
-            namespace=ns,
-            parameters=[{
-                'robot_description': robot_desc,
-                'frame_prefix': ns + '/'  # Añade orion_arm/ a cada link del URDF
-            }]
-        ),
 
-        # Bridge ESP32
+
         Node(
             package='orion_arm',
             executable='bridge_esp32',
             name='bridge_esp32',
-            namespace=ns,
             output='screen'
         ),
 
-        # Cinemática Inversa y Solvers (Ahora dentro del namespace)
-        Node(
-            package='orion_arm',
-            executable='orion_ik_node',
-            name='orion_ik_node',
-            output='screen'
-        ),
+
         
         # Driver del brazo
         Node(
@@ -61,22 +41,18 @@ def generate_launch_description():
             executable='orion_driver',
             name='orion_driver',
             output='screen'
-        ),
-
-        # GUI de control (nixito_gui)
-
-
-
-        
-        #Nodo teleoperacion brazo
+        ),        #Nodo teleoperacion brazo
         Node(
-            package='orion_arm',
-            executable ='teleop_arm',
-            name='teleop_arm',
+            package='nixito_drivers',
+            executable ='serial_data',
+            name='serial_data',
             output='screen',
         ),
 
-     
-           
-       
+        Node(
+            package='orion_arm',
+            executable ='test_gui',
+            name='raw_cmd_gui',
+            output='screen',
+        ),
     ])

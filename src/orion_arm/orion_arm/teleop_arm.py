@@ -26,7 +26,7 @@ class ControlTest(Node):
         self.pub_joint_states = self.create_publisher(JointState, '/nixito/joint_states', 10)
 
         try:
-            self.ser = serial.Serial('/dev/ttyTHS1', 115200, timeout=0.1)
+            self.ser = serial.Serial('/dev/ttyUSB1', 115200, timeout=0.1)
             self.get_logger().info("Conectado al Arduino en /dev/ttyTHS1 a 115200 baudios")
         except Exception as e:
             self.get_logger().error(f"Error crítico: No se pudo abrir /dev/ttyTHS1: {e}")

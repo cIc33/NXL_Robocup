@@ -32,7 +32,8 @@ setup(
             'orion_driver = orion_arm.orion_driver:main',
             'bridge_esp32 = orion_arm.bridge_esp32:main',
             'orion_ik_node = orion_arm.orion_ik_node:main',
-            'teleop_arm = orion_arm.teleop_arm:main'
+            'teleop_arm = orion_arm.teleop_arm:main',
+            'test_gui = orion_arm.raw_cmd_gui:main'
         ],
     },
 )

@@ -3,7 +3,6 @@ from rclpy.node import Node
 from std_msgs.msg import Int8MultiArray, Float32MultiArray
 from sensor_msgs.msg import JointState
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-
 import serial
 
 
@@ -14,14 +13,24 @@ class ControlTest(Node):
         qos_cmds = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=1
+            depth=10
         )
 
+        # Publishers brazo
         self.pub_brazo = self.create_publisher(Int8MultiArray, '/brazo/raw_cmd', qos_cmds)
         self.pub_servos = self.create_publisher(Int8MultiArray, '/brazo/servos_cmd', qos_cmds)
 
-        # JointState para encoders de tracción: position = pulsos, velocity = QPPS
-        self.pub_encoders = self.create_publisher(JointState, '/nixito/drive_encoders', qos_cmds)
+        # Publishers tracción
+        self.pub_encoders = self.create_publisher(Float32MultiArray, '/nixito/encoders', 10)
+        self.pub_velocidad = self.create_publisher(Float32MultiArray, '/nixito/velocidad', 10)
+
+        # JointState para TF/URDF
+        self.pub_joint_states = self.create_publisher(JointState, '/nixito/joint_states', 10)
+
+        # JointState adicional como en tu otro script
+        self.pub_drive_encoders = self.create_publisher(JointState, '/nixito/drive_encoders', qos_cmds)
+
+        # Subscriber para comandos TX al micro
         self.create_subscription(
             Float32MultiArray,
             '/cmd_vel',
@@ -30,23 +39,28 @@ class ControlTest(Node):
         )
 
         self.tx_values = [0, 0]
-        self.serial_buffer = ""
+        self.last_sent_tx_values = None
 
         try:
-            self.ser = serial.Serial('/dev/ttyTHS1', 115200, timeout=0.01)
-            self.get_logger().info("Conectado al Arduino en /dev/ttyTHS1 a 115200 baudios")
+            self.ser = serial.Serial('/dev/ttyUSB1', 115200, timeout=0.1)
+            self.ser.reset_input_buffer()
+            self.ser.reset_output_buffer()
+            self.get_logger().info("Conectado al Arduino en /dev/ttyUSB1 a 115200 baudios")
         except Exception as e:
-            self.get_logger().error(f"Error crítico: No se pudo abrir /dev/ttyTHS1: {e}")
+            self.get_logger().error(f"Error crítico: No se pudo abrir /dev/ttyUSB1: {e}")
             raise e
 
+        self.serial_buffer = ""
         self.timer = self.create_timer(0.02, self.timer_callback)
 
     def timer_callback(self):
         try:
+            # Leer todo lo disponible
             if self.ser.in_waiting > 0:
                 raw = self.ser.read(self.ser.in_waiting)
                 self.serial_buffer += raw.decode('utf-8', errors='ignore')
 
+            # Procesar líneas completas
             while '\n' in self.serial_buffer:
                 line, self.serial_buffer = self.serial_buffer.split('\n', 1)
                 line = line.strip()
@@ -54,12 +68,17 @@ class ControlTest(Node):
                 if not line:
                     continue
 
-                if line.startswith("ARM:"):
-                    self._parse_arm(line)
-                elif line.startswith("DRV:"):
-                    self._parse_drv(line)
+                self.get_logger().info(f"SERIAL RAW: {line}")
 
-            self._write_tx_values()
+                if line.startswith("DRV:"):
+                    self.procesar_drv(line)
+                elif line.startswith("ARM:"):
+                    self.procesar_arm(line)
+                else:
+                    self.get_logger().warn(f"Línea desconocida: {line}")
+
+            # Enviar solo si cambió el comando
+            self._write_tx_values_if_changed()
 
         except Exception as e:
             self.get_logger().error(f"Error procesando serial: {e}")
@@ -68,70 +87,109 @@ class ControlTest(Node):
         data = list(msg.data)
 
         if len(data) < 2:
-            self.get_logger().warn(f"/tal_topico invalido, se esperaban 2 valores: {data}")
+            self.get_logger().warn(f"/cmd_vel inválido, se esperaban al menos 2 valores: {data}")
             return
 
-        self.tx_values = [int(data[0]), int(data[1])]
+        try:
+            self.tx_values = [int(data[0]), int(data[1])]
+            self.get_logger().info(f"Nuevo cmd_vel recibido: {self.tx_values}")
+        except Exception as e:
+            self.get_logger().warn(f"Error convirtiendo /cmd_vel {data}: {e}")
 
-        self.get_logger().info(f"{data[0]},{data[1]}")
+    def _write_tx_values_if_changed(self):
+        if self.last_sent_tx_values == self.tx_values:
+            return
 
-    def _write_tx_values(self):
         payload = f"{self.tx_values[0]},{self.tx_values[1]}\n"
 
         try:
             self.ser.write(payload.encode('utf-8'))
+            self.last_sent_tx_values = self.tx_values.copy()
+            self.get_logger().info(f"TX serial: {payload.strip()}")
         except Exception as e:
             self.get_logger().error(f"Error enviando serial '{payload.strip()}': {e}")
 
-    def _parse_arm(self, line):
-        parts = line.replace("ARM:", "").split(',')
+    def procesar_drv(self, line):
+        try:
+            datos = line.replace("DRV:", "").split(',')
 
-        if len(parts) != 6:
-            return
+            if len(datos) != 4:
+                self.get_logger().warn(f"DRV inválido: {datos}")
+                return
 
-        raw_values = [int(val) for val in parts]
+            values = [float(val.strip()) for val in datos]
 
-        # Escala de -100..100 a -10..10
-        brazo = [int(val / 10.0) for val in raw_values[:4]]
-        servos = raw_values[4:6]
+            encoders = values[:2]
+            velocidad = values[2:]
 
-        msg_brazo = Int8MultiArray()
-        msg_brazo.data = brazo
-        self.pub_brazo.publish(msg_brazo)
+            self.get_logger().info(f"ENC={encoders} VEL={velocidad}")
 
-        msg_servos = Int8MultiArray()
-        msg_servos.data = servos
-        self.pub_servos.publish(msg_servos)
+            # Publicar encoders
+            msg_enc = Float32MultiArray()
+            msg_enc.data = encoders
+            self.pub_encoders.publish(msg_enc)
 
+            # Publicar velocidad
+            msg_vel = Float32MultiArray()
+            msg_vel.data = velocidad
+            self.pub_velocidad.publish(msg_vel)
 
+            # Publicar /nixito/joint_states
+            msg_js = JointState()
+            msg_js.header.stamp = self.get_clock().now().to_msg()
+            msg_js.name = ['dir_R_joint', 'dir_L_joint']
+            msg_js.position = [encoders[0], encoders[1]]
+            msg_js.velocity = [velocidad[0], velocidad[1]]
+            msg_js.effort = []
+            self.pub_joint_states.publish(msg_js)
 
-    def _parse_drv(self, line):
-        parts = line.replace("DRV:", "").split(',')
+            # Publicar /nixito/drive_encoders
+            msg_drive = JointState()
+            msg_drive.header.stamp = self.get_clock().now().to_msg()
+            msg_drive.name = ['drive_left', 'drive_right']
+            msg_drive.position = [encoders[0], encoders[1]]
+            msg_drive.velocity = [velocidad[0], velocidad[1]]
+            msg_drive.effort = []
+            self.pub_drive_encoders.publish(msg_drive)
 
-        if len(parts) != 4:
-            self.get_logger().warn(f"DRV invalido: {parts}")
-            return
+        except ValueError as e:
+            self.get_logger().warn(f"DRV valor no numérico: {e}")
+        except Exception as e:
+            self.get_logger().warn(f"Error en procesar_drv: {e}")
 
-        # DRV:pos_izq, pos_der, vel_izq, vel_der
-        pos_izq = float(parts[0])
-        pos_der = float(parts[1])
-        vel_izq = float(parts[2])
-        vel_der = float(parts[3])
+    def procesar_arm(self, line):
+        try:
+            parts = line.replace("ARM:", "").split(',')
 
-        msg = JointState()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.name = ['drive_left', 'drive_right']
-        msg.position = [pos_izq, pos_der]   # pulsos acumulados del encoder
-        msg.velocity = [vel_izq, vel_der]   # QPPS (quadrature pulses per second)
-        msg.effort = []
+            if len(parts) != 6:
+                self.get_logger().warn(f"ARM inválido: {parts}")
+                return
 
-        self.pub_encoders.publish(msg)
+            raw_values = [int(val.strip()) for val in parts]
 
+            brazo = [int(val / 10.0) for val in raw_values[:4]]
+            servos = raw_values[4:6]
+
+            self.get_logger().info(f"BRAZO={brazo} SERVOS={servos}")
+
+            msg_brazo = Int8MultiArray()
+            msg_brazo.data = brazo
+            self.pub_brazo.publish(msg_brazo)
+
+            msg_servos = Int8MultiArray()
+            msg_servos.data = servos
+            self.pub_servos.publish(msg_servos)
+
+        except ValueError as e:
+            self.get_logger().warn(f"ARM valor no numérico: {e}")
+        except Exception as e:
+            self.get_logger().warn(f"Error en procesar_arm: {e}")
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = ControlTest()
+
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
