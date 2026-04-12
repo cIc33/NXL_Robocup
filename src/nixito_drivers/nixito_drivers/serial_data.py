@@ -4,6 +4,7 @@ from std_msgs.msg import Int8MultiArray, Float32MultiArray
 from sensor_msgs.msg import JointState
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 import serial
+import time
 
 
 class ControlTest(Node):
@@ -26,11 +27,9 @@ class ControlTest(Node):
 
         # JointState para TF/URDF
         self.pub_joint_states = self.create_publisher(JointState, '/nixito/joint_states', 10)
-
-        # JointState adicional como en tu otro script
         self.pub_drive_encoders = self.create_publisher(JointState, '/nixito/drive_encoders', qos_cmds)
 
-        # Subscriber para comandos TX al micro
+        # Subscriber cmd_vel
         self.create_subscription(
             Float32MultiArray,
             '/cmd_vel',
@@ -39,15 +38,16 @@ class ControlTest(Node):
         )
 
         self.tx_values = [0, 0]
-        self.last_sent_tx_values = None
+        self.send_interval = 0.05  # Envío continuo a 20Hz
+        self.last_send_time = 0.0
 
         try:
-            self.ser = serial.Serial('/dev/ttyUSB1', 115200, timeout=0.1)
+            self.ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=0.1)
             self.ser.reset_input_buffer()
             self.ser.reset_output_buffer()
-            self.get_logger().info("Conectado al Arduino en /dev/ttyUSB1 a 115200 baudios")
+            self.get_logger().info("Conectado en /dev/ttyUSB0 a 115200 baudios")
         except Exception as e:
-            self.get_logger().error(f"Error crítico: No se pudo abrir /dev/ttyUSB1: {e}")
+            self.get_logger().error(f"Error crítico: No se pudo abrir el puerto serial: {e}")
             raise e
 
         self.serial_buffer = ""
@@ -55,7 +55,7 @@ class ControlTest(Node):
 
     def timer_callback(self):
         try:
-            # Leer todo lo disponible
+            # Leer serial
             if self.ser.in_waiting > 0:
                 raw = self.ser.read(self.ser.in_waiting)
                 self.serial_buffer += raw.decode('utf-8', errors='ignore')
@@ -68,8 +68,6 @@ class ControlTest(Node):
                 if not line:
                     continue
 
-                self.get_logger().info(f"SERIAL RAW: {line}")
-
                 if line.startswith("DRV:"):
                     self.procesar_drv(line)
                 elif line.startswith("ARM:"):
@@ -77,8 +75,11 @@ class ControlTest(Node):
                 else:
                     self.get_logger().warn(f"Línea desconocida: {line}")
 
-            # Enviar solo si cambió el comando
-            self._write_tx_values_if_changed()
+            # Envío continuo de cmd_vel
+            now = time.time()
+            if now - self.last_send_time >= self.send_interval:
+                self._write_tx_values()
+                self.last_send_time = now
 
         except Exception as e:
             self.get_logger().error(f"Error procesando serial: {e}")
@@ -87,25 +88,21 @@ class ControlTest(Node):
         data = list(msg.data)
 
         if len(data) < 2:
-            self.get_logger().warn(f"/cmd_vel inválido, se esperaban al menos 2 valores: {data}")
+            self.get_logger().warn(f"/cmd_vel inválido: {data}")
             return
 
         try:
-            self.tx_values = [int(data[0]), int(data[1])]
-            self.get_logger().info(f"Nuevo cmd_vel recibido: {self.tx_values}")
+            new_values = [int(data[0]), int(data[1])]
+            if new_values != self.tx_values:
+                self.tx_values = new_values
+                self.get_logger().info(f"Nuevo cmd_vel: {self.tx_values}")
         except Exception as e:
             self.get_logger().warn(f"Error convirtiendo /cmd_vel {data}: {e}")
 
-    def _write_tx_values_if_changed(self):
-        if self.last_sent_tx_values == self.tx_values:
-            return
-
+    def _write_tx_values(self):
         payload = f"{self.tx_values[0]},{self.tx_values[1]}\n"
-
         try:
             self.ser.write(payload.encode('utf-8'))
-            self.last_sent_tx_values = self.tx_values.copy()
-            self.get_logger().info(f"TX serial: {payload.strip()}")
         except Exception as e:
             self.get_logger().error(f"Error enviando serial '{payload.strip()}': {e}")
 
@@ -118,23 +115,19 @@ class ControlTest(Node):
                 return
 
             values = [float(val.strip()) for val in datos]
-
             encoders = values[:2]
             velocidad = values[2:]
 
             self.get_logger().info(f"ENC={encoders} VEL={velocidad}")
 
-            # Publicar encoders
             msg_enc = Float32MultiArray()
             msg_enc.data = encoders
             self.pub_encoders.publish(msg_enc)
 
-            # Publicar velocidad
             msg_vel = Float32MultiArray()
             msg_vel.data = velocidad
             self.pub_velocidad.publish(msg_vel)
 
-            # Publicar /nixito/joint_states
             msg_js = JointState()
             msg_js.header.stamp = self.get_clock().now().to_msg()
             msg_js.name = ['dir_R_joint', 'dir_L_joint']
@@ -143,7 +136,6 @@ class ControlTest(Node):
             msg_js.effort = []
             self.pub_joint_states.publish(msg_js)
 
-            # Publicar /nixito/drive_encoders
             msg_drive = JointState()
             msg_drive.header.stamp = self.get_clock().now().to_msg()
             msg_drive.name = ['drive_left', 'drive_right']
@@ -166,7 +158,6 @@ class ControlTest(Node):
                 return
 
             raw_values = [int(val.strip()) for val in parts]
-
             brazo = [int(val / 10.0) for val in raw_values[:4]]
             servos = raw_values[4:6]
 
@@ -196,6 +187,7 @@ def main(args=None):
         node.get_logger().info("Deteniendo nodo por teclado...")
     finally:
         if hasattr(node, 'ser') and node.ser.is_open:
+            node.ser.write(b"0,0\n")
             node.ser.close()
             node.get_logger().info("Puerto serial cerrado.")
         node.destroy_node()

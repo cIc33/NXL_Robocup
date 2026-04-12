@@ -25,7 +25,7 @@ def generate_launch_description():
 
     return LaunchDescription([
 
-
+	#Puente para esp32
         Node(
             package='orion_arm',
             executable='bridge_esp32',
@@ -49,10 +49,4 @@ def generate_launch_description():
             output='screen',
         ),
 
-        Node(
-            package='orion_arm',
-            executable ='test_gui',
-            name='raw_cmd_gui',
-            output='screen',
-        ),
     ])
