@@ -18,8 +18,8 @@ def generate_launch_description():
     )
     
     gopro = ExecuteProcess(
-        cmd=['sudo','gopro','webcam', '-a', '-n','-r','480'],
-        cwd='/home/sahid/v4l2loopback/gopro_as_webcam_on_linux',
+        cmd=['sudo', './gopro', 'webcam', '-a', '-n', '-r', '480', '-i', '172.23.197.51'],
+        cwd='/home/aicistemthor/v4l2loopback/gopro_as_webcam_on_linux',
         output='screen'
     )
 
