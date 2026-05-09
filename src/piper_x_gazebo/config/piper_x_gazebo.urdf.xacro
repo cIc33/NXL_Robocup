@@ -1,0 +1,56 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="piper_x">
+    <link name="world"/>
+    <joint name="fixed_base_joint" type="fixed">
+        <parent link="world"/>
+        <child link="base_link"/>
+    </joint>
+
+    <xacro:include filename="$(find piper_x_description)/urdf/piper_x_description_gazebo.xacro" />
+    <xacro:include filename="$(find piper_x_gazebo)/config/piper_x.ros2_control.xacro" />
+
+    <xacro:piper_x_gazebo_ros2_control name="GazeboSystem"/>
+
+    <gazebo>
+        <plugin name="gazebo_ros2_control" filename="libgazebo_ros2_control.so">
+            <parameters>$(find piper_x_gazebo)/config/ros2_controllers.yaml</parameters>
+            <robot_param_node>robot_state_publisher</robot_param_node>
+        </plugin>
+    </gazebo>
+
+    <!-- Simulated RGB-D camera mounted on the D435 body for bring-up. -->
+    <gazebo reference="camera_link">
+        <sensor type="depth" name="realsense_d435">
+            <always_on>true</always_on>
+            <update_rate>15</update_rate>
+            <visualize>false</visualize>
+            <camera>
+                <horizontal_fov>1.211</horizontal_fov>
+                <image>
+                    <width>640</width>
+                    <height>480</height>
+                    <format>B8G8R8</format>
+                </image>
+                <depth_camera/>
+                <clip>
+                    <near>0.05</near>
+                    <far>5.0</far>
+                </clip>
+            </camera>
+            <plugin name="realsense_d435_controller" filename="libgazebo_ros_camera.so">
+                <ros>
+                    <namespace>camera</namespace>
+                    <remapping>color/image_raw:=color/image_raw</remapping>
+                    <remapping>color/depth/image_raw:=depth/image_rect_raw</remapping>
+                    <remapping>color/camera_info:=color/camera_info</remapping>
+                    <remapping>color/depth/camera_info:=depth/camera_info</remapping>
+                    <remapping>color/points:=depth/points</remapping>
+                </ros>
+                <camera_name>color</camera_name>
+                <frame_name>camera_color_optical_frame</frame_name>
+                <min_depth>0.05</min_depth>
+                <max_depth>5.0</max_depth>
+            </plugin>
+        </sensor>
+    </gazebo>
+</robot>
