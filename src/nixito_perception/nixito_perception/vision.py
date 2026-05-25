@@ -15,15 +15,10 @@ from ultralytics import YOLO
 # ===========================================================================
 
 # ── YOLO ────────────────────────────────────────────────────────────────────
-YOLO_MODEL_PATH  = "/home/angel/rob_repo/nixito_robot/src/nixito_perception/NixitoS.pt"
+YOLO_MODEL_PATH  = "/home/angel/NXL_Robocup/src/nixito_perception/modelos/Robocup_NXL.pt"
 YOLO_MIN_PERIOD  = 0.05    # s  → throughput máximo ~20 fps
 YOLO_CONF        = 0.5     # Umbral de confianza mínima
 YOLO_IMGSZ       = 480     # Tamaño de imagen de entrada para inferencia
-
-# ── Cámara térmica ───────────────────────────────────────────────────────────
-THERMAL_ZOOM  = 1.5        # Factor de zoom virtual aplicado a la imagen térmica
-THERMAL_T_MIN = 5.0        # °C – cota inferior para normalización
-THERMAL_T_MAX = 50.0       # °C – cota superior para normalización
 
 # ── QR ──────────────────────────────────────────────────────────────────────
 QR_HOLD_SECS = 0.8         # Segundos que persiste el último resultado detectado
@@ -42,13 +37,11 @@ FRAME_BUFFER_MAXLEN = 15   # Longitud máxima del buffer circular de frames gris
 
 # ── Topics ROS ───────────────────────────────────────────────────────────────
 TOPIC_INPUT_RGB     = "/principal/image_raw"
-TOPIC_INPUT_THERMAL = "brazo/termica_imagen"
 
 # Mapa: nombre_modo → (topic_de_salida, qos)
 TOPIC_OUTPUTS = {
     "yolo":     ("vision/yolo",     10),
     "qr":       ("vision/qr",       10),
-    "thermal":  ("vision/thermal",  10),
     "movement": ("vision/movement", 10),
 }
 
@@ -86,7 +79,6 @@ class VisionNode(LifecycleNode):
         self.mog2         = None   # Sustractor de fondo MOG2 (movimiento)
 
         # ── Recursos ligeros (siempre disponibles) ───────────────────────────
-        self.last_thermal  = None                          # Último frame térmico cacheado
         self.frame_buffer  = deque(maxlen=FRAME_BUFFER_MAXLEN)  # Buffer circular de frames
         self.kernel        = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         self._clahe        = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
@@ -136,9 +128,6 @@ class VisionNode(LifecycleNode):
             Image, TOPIC_INPUT_RGB, self._main_loop, 1
         )
         qos_thermal = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
-        self.sub_thermal = self.create_subscription(
-            Image, TOPIC_INPUT_THERMAL, self._thermal_callback, qos_thermal
-        )
 
         # Timers de monitorización
         self._timer_check_subs = self.create_timer(TIMER_CHECK_SUBS, self._check_subscribers)
@@ -391,35 +380,6 @@ class VisionNode(LifecycleNode):
         )
         return frame
 
-    # ── Pipeline Térmico ─────────────────────────────────────────────────────
-
-    def _thermal_callback(self, msg: Image) -> None:
-        try:
-            self.last_thermal = self.bridge.imgmsg_to_cv2(msg, desired_encoding="64FC1")
-        except Exception as exc:
-            self.get_logger().warn(f"Error decodificando frame térmico: {exc}")
-
-    def _process_thermal(self, frame: np.ndarray) -> np.ndarray:
-
-        t0 = time.time()
-
-        if self.last_thermal is not None:
-            thermal = self._normalize_thermal(self.last_thermal)
-            thermal = self._virtual_zoom(thermal, THERMAL_ZOOM)
-            thermal = cv2.GaussianBlur(thermal, (3, 3), 0)
-            thermal = cv2.applyColorMap(thermal, cv2.COLORMAP_PLASMA)
-            thermal = cv2.flip(thermal, 1)
-            thermal = cv2.resize(thermal, (frame.shape[1], frame.shape[0]))
-            frame   = cv2.addWeighted(frame, 0.5, thermal, 1.0, 0)
-
-        latency = (time.time() - t0) * 1000
-        cv2.putText(
-            frame,
-            f"Thermal Active | Latency: {latency:.1f} ms",
-            (10, 30), cv2.FONT_HERSHEY_TRIPLEX, 0.7, (255, 255, 255), 2,
-        )
-        return frame
-
     # ── Pipeline de Movimiento ───────────────────────────────────────────────
 
     def _process_movement(self, frame: np.ndarray) -> np.ndarray:
@@ -502,12 +462,6 @@ class VisionNode(LifecycleNode):
     def _is_active(self) -> bool:
         """Devuelve True si la máquina de estados del ciclo de vida está en 'active'."""
         return self._state_machine.current_state[1] == "active"
-
-    def _normalize_thermal(self, data: np.ndarray) -> np.ndarray:
-        normalized = (
-            np.clip((data - THERMAL_T_MIN) / (THERMAL_T_MAX - THERMAL_T_MIN), 0, 1) * 255
-        )
-        return normalized.astype(np.uint8)
 
     def _virtual_zoom(self, frame: np.ndarray, factor: float) -> np.ndarray:
         if factor <= 1:
