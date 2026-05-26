@@ -30,7 +30,7 @@ TEAM_NAME          = 'NIXITO'
 COUNTRY            = 'Mexico'
 ROBOT              = 'Nixito'
 MODE               = 'T'
-QR_HOLD_SECS       = 2.0
+QR_HOLD_SECS       = 0.5
 DETECTION_COOLDOWN = 20.0
 
 PKG_DIR      = Path('/home/angel/NXL_Robocup/src/nixito_perception/nixito_perception/csv')
@@ -416,14 +416,14 @@ class DetectorNode(Node):
 
                 if count >= self.min_confirmations:
                     detection_type = self.get_detection_type(name)
-                    x3d = coords_3d[0] if coords_3d else None
-                    y3d = coords_3d[1] if coords_3d else None
+                    #x3d = coords_3d[0] if coords_3d else None
+                    #y3d = coords_3d[1] if coords_3d else None
                     z3d = coords_3d[2] if coords_3d else None
 
                     if detection_type != 'unknown':
                         self._publish_detection(
                             detection_type, name, confidence,
-                            x=x3d, y=y3d, z=z3d)
+                            x=0, y=0, z=z3d)
                     else:
                         self.get_logger().warn(f'Clase sin mapear: {name}')
                     self.detection_counts[name] = 0
@@ -435,10 +435,10 @@ class DetectorNode(Node):
             annotated, qr_value, qr_coords = self._process_qr(annotated, scale_x, scale_y)
 
             if qr_value:
-                x3d = qr_coords[0] if qr_coords else None
-                y3d = qr_coords[1] if qr_coords else None
+                #x3d = qr_coords[0] if qr_coords else None
+                #y3d = qr_coords[1] if qr_coords else None
                 z3d = qr_coords[2] if qr_coords else None
-                self._publish_detection('ar_code', qr_value, x=x3d, y=y3d, z=z3d)
+                self._publish_detection('ar_code', qr_value, x=0, y=0, z=z3d)
                 self.get_logger().info(f'QR detectado: {qr_value}')
 
             with self.lock:
