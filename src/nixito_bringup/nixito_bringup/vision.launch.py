@@ -29,25 +29,6 @@ def generate_launch_description():
         output='screen'
     )
 
-    usb_cam_brazo = Node(
-        package='usb_cam',
-        executable='usb_cam_node_exe',
-        name='usb_cam',
-        namespace='brazo',
-        output='screen',
-        parameters=[{
-            'video_device': '/dev/video0',
-            'image_width': 640,
-            'image_height': 480,
-            'framerate': 30.0,
-            'brightness': -1,
-            'contrast': -1,
-            'saturation': -1,
-            'sharpness': -1,
-            'autofocus': True,
-        }]
-    )
-
     vision_node = LifecycleNode(
         package='nixito_perception',
         executable='vision',
@@ -61,13 +42,6 @@ def generate_launch_description():
             lifecycle_node_matcher=lambda action: action == vision_node,
             transition_id=Transition.TRANSITION_CONFIGURE,
         )
-    )
-
-    thermal = Node(
-        package='nixito_perception',
-        executable='thermal',
-        name='thermal_cam',
-        output='screen'
     )
 
     foxglove = Node(
@@ -103,8 +77,6 @@ def generate_launch_description():
         gopro,
         esperar_video,
         foxglove,
-        usb_cam_brazo,
         vision_node,
         configure_vision,
-        thermal,
     ])
