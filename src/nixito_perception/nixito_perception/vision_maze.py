@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CameraInfo
 from std_msgs.msg import String
 from cv_bridge import CvBridge
 from ultralytics import YOLO
@@ -25,15 +25,15 @@ REAL_OBJECT_CLASSES = {
     'Backpack', 'fire_extinguisher', 'gas tank', 'helmet',
 }
 
-YEAR                  = '2026'
-TEAM_NAME             = 'NIXITO'
-COUNTRY               = 'Mexico'
-ROBOT                 = 'Nixito'
-MODE                  = 'T'
-QR_HOLD_SECS          = 2.0
-DETECTION_COOLDOWN    = 20.0
+YEAR               = '2026'
+TEAM_NAME          = 'NIXITO'
+COUNTRY            = 'Mexico'
+ROBOT              = 'Nixito'
+MODE               = 'T'
+QR_HOLD_SECS       = 2.0
+DETECTION_COOLDOWN = 20.0
 
-PKG_DIR      = Path('/home/nixito/nixito_robot/src/detector')
+PKG_DIR      = Path('/home/angel/NXL_Robocup/src/nixito_perception/nixito_perception/csv')
 MISSION_FILE = PKG_DIR / 'mission.txt'
 CSV_DIR      = PKG_DIR / 'csv'
 
@@ -42,15 +42,15 @@ class DetectorNode(Node):
     def __init__(self):
         super().__init__('detector_node')
 
-        self.declare_parameter('model_path', '/home/nixito/nixito_robot/src/realsense/realsense/best.pt')
+        self.declare_parameter('model_path', '/home/angel/NXL_Robocup/src/nixito_perception/modelos/Robocup_NXL.pt')
         self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
         self.declare_parameter('confidence_threshold', 0.75)
         self.declare_parameter('min_confirmations', 5)
 
-        model_path = self.get_parameter('model_path').value
-        image_topic = self.get_parameter('image_topic').value
+        model_path   = self.get_parameter('model_path').value
+        image_topic  = self.get_parameter('image_topic').value
         self.confidence_threshold = self.get_parameter('confidence_threshold').value
-        self.min_confirmations = self.get_parameter('min_confirmations').value
+        self.min_confirmations    = self.get_parameter('min_confirmations').value
 
         self.model = YOLO(model_path)
         self.get_logger().info(f'Modelo cargado: {model_path}')
@@ -58,12 +58,17 @@ class DetectorNode(Node):
         self.bridge = CvBridge()
         self.detection_counts = {}
         self.detection_counter = 0
-        self._last_published_time = {}  # nombre -> timestamp última publicación
+        self._last_published_time = {}
 
-        self.latest_frame = None
-        self.latest_header = None
+        self.latest_frame   = None
+        self.latest_header  = None
         self.last_annotated = None
         self.lock = threading.Lock()
+
+        # ── Profundidad ───────────────────────────────────────────────────────
+        self.depth_image = None
+        self.camera_info = None
+        self.fx = self.fy = self.cx = self.cy = None
 
         # QR
         self.qr_detector    = cv2.QRCodeDetector()
@@ -77,16 +82,64 @@ class DetectorNode(Node):
         # CSV
         self.csv_file, self.csv_writer = self._init_csv()
 
-        self.pub = self.create_publisher(String, 'detection/name', 10)
+        self.pub       = self.create_publisher(String, 'detection/name', 10)
         self.image_pub = self.create_publisher(Image, 'detection/annotated', 10)
+
         self.create_subscription(Image, image_topic, self.image_callback, 10)
+
+        self.create_subscription(
+            CameraInfo,
+            '/camera/camera/color/camera_info',
+            self.info_callback, 10)
+
+        self.create_subscription(
+            Image,
+            '/camera/camera/aligned_depth_to_color/image_raw',
+            self.depth_callback, 10)
 
         self.inference_thread = threading.Thread(target=self.inference_loop, daemon=True)
         self.inference_thread.start()
 
         self.get_logger().info('Nodo iniciado')
 
-    # ── CSV ──────────────────────────────────────────────────────────────────
+    # ── Profundidad ───────────────────────────────────────────────────────────
+
+    def info_callback(self, msg: CameraInfo):
+        self.fx = msg.k[0]
+        self.fy = msg.k[4]
+        self.cx = msg.k[2]
+        self.cy = msg.k[5]
+        self.camera_info = msg
+
+    def depth_callback(self, msg: Image):
+        depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+        with self.lock:
+            self.depth_image = depth
+
+    def pixel_to_3d(self, u: int, v: int):
+        with self.lock:
+            depth = self.depth_image
+            info  = self.camera_info
+
+        if depth is None or info is None:
+            return None
+
+        h, w = depth.shape[:2]
+        u = int(np.clip(u, 5, w - 6))
+        v = int(np.clip(v, 5, h - 6))
+
+        roi   = depth[v - 5:v + 5, u - 5:u + 5]
+        valid = roi[roi > 0]
+
+        if len(valid) == 0:
+            return None
+
+        z = np.median(valid) / 1000.0
+        x = (u - self.cx) * z / self.fx
+        y = (v - self.cy) * z / self.fy
+        return float(x), float(y), float(z)
+
+    # ── CSV ───────────────────────────────────────────────────────────────────
 
     def _read_mission_number(self) -> int:
         if not MISSION_FILE.exists():
@@ -107,10 +160,13 @@ class DetectorNode(Node):
 
         CSV_DIR.mkdir(parents=True, exist_ok=True)
 
-        filename = f'RoboCup{YEAR}-{TEAM_NAME}-Prelim{mission_num}-{start_date}-{start_time_file}-pois.csv'
+        filename = (
+            f'RoboCup{YEAR}-{TEAM_NAME}-Prelim{mission_num}'
+            f'-{start_date}-{start_time_file}-pois.csv'
+        )
         filepath = CSV_DIR / filename
 
-        f = open(filepath, 'w', newline='')
+        f      = open(filepath, 'w', newline='')
         writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
 
         f.write('"pois"\n')
@@ -127,20 +183,23 @@ class DetectorNode(Node):
         self.get_logger().info(f'CSV creado: {filepath}')
         return f, writer
 
-    def write_csv_row(self, detection_type: str, name: str):
+    def write_csv_row(self, detection_type: str, name: str,
+                      x: float = None, y: float = None, z: float = None):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         self.csv_writer.writerow([
             self.detection_counter,
             timestamp,
             detection_type,
             name,
-            '', '', '',
+            f'{x:.3f}' if x is not None else '',
+            f'{y:.3f}' if y is not None else '',
+            f'{z:.3f}' if z is not None else '',
             ROBOT,
             MODE,
         ])
         self.csv_file.flush()
 
-    # ── Detección ────────────────────────────────────────────────────────────
+    # ── Detección ─────────────────────────────────────────────────────────────
 
     def get_detection_type(self, name: str) -> str:
         if name in HAZMAT_CLASSES:
@@ -149,7 +208,9 @@ class DetectorNode(Node):
             return 'real_object'
         return 'unknown'
 
-    def _publish_detection(self, detection_type: str, name: str, confidence: float = 0.0):
+    def _publish_detection(self, detection_type: str, name: str,
+                           confidence: float = 0.0,
+                           x: float = None, y: float = None, z: float = None):
         now  = time.time()
         last = self._last_published_time.get(name, 0.0)
 
@@ -162,23 +223,27 @@ class DetectorNode(Node):
 
         self._last_published_time[name] = now
         self.detection_counter += 1
-        self.write_csv_row(detection_type, name)
+        self.write_csv_row(detection_type, name, x, y, z)
 
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        out = String()
+        x_str = f'{x:.3f}' if x is not None else ' '
+        y_str = f'{y:.3f}' if y is not None else ' '
+        z_str = f'{z:.3f}' if z is not None else ' '
+
+        out      = String()
         out.data = (
             f'{self.detection_counter},'
             f'{timestamp},'
             f'{detection_type},'
             f'"{name}",'
-            f' , , ,'
+            f'{x_str},{y_str},{z_str},'
             f'{ROBOT},'
             f'{MODE}'
         )
         self.pub.publish(out)
         self.get_logger().info(f'Publicado: {out.data}')
 
-    # ── Pipeline QR ──────────────────────────────────────────────────────────
+    # ── Pipeline QR ───────────────────────────────────────────────────────────
 
     def _build_gamma_lut(self, gamma: float = 1.5) -> np.ndarray:
         inv_gamma = 1.0 / gamma
@@ -223,7 +288,7 @@ class DetectorNode(Node):
             return False
         return True
 
-    def _process_qr(self, frame: np.ndarray) -> tuple:
+    def _process_qr(self, frame: np.ndarray, scale_x: float, scale_y: float) -> tuple:
         t0 = time.time()
         variants, (sx, sy) = self._preprocess_for_qr(frame)
         value, pts = '', None
@@ -242,6 +307,7 @@ class DetectorNode(Node):
                 break
 
         new_detection = None
+        qr_coords     = None
 
         if pts is not None and self._validate_qr(value, pts, frame.shape):
             self._qr_last_value = value
@@ -252,10 +318,20 @@ class DetectorNode(Node):
                 self._qr_published.add(value)
                 new_detection = value
 
+                pts_i      = np.int32(pts).reshape(-1, 2)
+                qr_cx_ann  = int(pts_i[:, 0].mean())
+                qr_cy_ann  = int(pts_i[:, 1].mean())
+
+                qr_cx_orig = int(qr_cx_ann * scale_x)
+                qr_cy_orig = int(qr_cy_ann * scale_y)
+                qr_coords  = self.pixel_to_3d(qr_cx_orig, qr_cy_orig)
+
         age = time.time() - self._qr_last_seen
         if age < QR_HOLD_SECS and self._qr_last_pts is not None:
-            pts_i         = np.int32(self._qr_last_pts).reshape(-1, 2)
-            x, y, bw, bh  = cv2.boundingRect(pts_i)
+            pts_i        = np.int32(self._qr_last_pts).reshape(-1, 2)
+            x, y, bw, bh = cv2.boundingRect(pts_i)
+            qr_cx_ann    = x + bw // 2
+            qr_cy_ann    = y + bh // 2
 
             overlay = frame.copy()
             cv2.rectangle(overlay, (x, y), (x + bw, y + bh), (0, 255, 0), -1)
@@ -263,16 +339,23 @@ class DetectorNode(Node):
             cv2.rectangle(frame, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
 
             label = self._qr_last_value[:40] + ('…' if len(self._qr_last_value) > 40 else '')
-            cv2.putText(frame, label, (x, max(y - 10, 20)),
+            cv2.putText(frame, label, (x, max(y - 22, 20)),
                         cv2.FONT_HERSHEY_TRIPLEX, 0.65, (255, 255, 255), 2)
 
-        status = 'QR Active' if age < QR_HOLD_SECS else 'Scanning'
-        cv2.putText(frame, f'{status} | {(time.time() - t0) * 1000:.1f} ms',
-                    (10, 30), cv2.FONT_HERSHEY_TRIPLEX, 0.7, (255, 0, 255), 1)
+            # Distancia en el frame junto al centro del QR
+            qr_cx_orig_rt = int(qr_cx_ann * scale_x)
+            qr_cy_orig_rt = int(qr_cy_ann * scale_y)
+            rt_coords     = self.pixel_to_3d(qr_cx_orig_rt, qr_cy_orig_rt)
+            if rt_coords is not None:
+                cv2.circle(frame, (qr_cx_ann, qr_cy_ann), 6, (0, 0, 255), -1)
+                cv2.putText(frame, f'{rt_coords[2]:.2f}m',
+                            (qr_cx_ann + 8, qr_cy_ann),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-        return frame, new_detection
 
-    # ── Callbacks ────────────────────────────────────────────────────────────
+        return frame, new_detection, qr_coords
+
+    # ── Callbacks ─────────────────────────────────────────────────────────────
 
     def image_callback(self, msg: Image):
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
@@ -282,11 +365,8 @@ class DetectorNode(Node):
             self.latest_header = msg.header
             annotated          = self.last_annotated
 
-        if annotated is not None:
-            annotated_msg = self.bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
-        else:
-            annotated_msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
-
+        annotated_msg = self.bridge.cv2_to_imgmsg(
+            annotated if annotated is not None else frame, encoding='bgr8')
         annotated_msg.header = msg.header
         self.image_pub.publish(annotated_msg)
 
@@ -298,8 +378,12 @@ class DetectorNode(Node):
             if frame is None:
                 continue
 
-            small   = cv2.resize(frame, (640, 360))
-            results = self.model(small, conf=self.confidence_threshold, imgsz=320, verbose=False)[0]
+            orig_h, orig_w = frame.shape[:2]
+            scale_x = orig_w / 640.0
+            scale_y = orig_h / 360.0
+
+            small     = cv2.resize(frame, (640, 360))
+            results   = self.model(small, conf=self.confidence_threshold, imgsz=320, verbose=False)[0]
             annotated = results.plot()
 
             detected_this_frame = set()
@@ -310,13 +394,36 @@ class DetectorNode(Node):
                 name       = results.names[class_id]
                 detected_this_frame.add(name)
 
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                cx_ann  = int((x1 + x2) / 2)
+                cy_ann  = int((y1 + y2) / 2)
+
+                cx_orig = int(cx_ann * scale_x)
+                cy_orig = int(cy_ann * scale_y)
+
+                coords_3d = self.pixel_to_3d(cx_orig, cy_orig)
+                dist_m    = coords_3d[2] if coords_3d is not None else None
+
+                # Punto rojo y distancia en el frame (igual que perception_node)
+                cv2.circle(annotated, (cx_ann, cy_ann), 6, (0, 0, 255), -1)
+                cv2.putText(annotated,
+                            f'{dist_m:.2f}m' if dist_m is not None else '--',
+                            (cx_ann + 8, cy_ann),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
                 self.detection_counts[name] = self.detection_counts.get(name, 0) + 1
                 count = self.detection_counts[name]
 
                 if count >= self.min_confirmations:
                     detection_type = self.get_detection_type(name)
+                    x3d = coords_3d[0] if coords_3d else None
+                    y3d = coords_3d[1] if coords_3d else None
+                    z3d = coords_3d[2] if coords_3d else None
+
                     if detection_type != 'unknown':
-                        self._publish_detection(detection_type, name, confidence)
+                        self._publish_detection(
+                            detection_type, name, confidence,
+                            x=x3d, y=y3d, z=z3d)
                     else:
                         self.get_logger().warn(f'Clase sin mapear: {name}')
                     self.detection_counts[name] = 0
@@ -325,10 +432,13 @@ class DetectorNode(Node):
                 if name not in detected_this_frame:
                     self.detection_counts[name] = 0
 
-            annotated, qr_value = self._process_qr(annotated)
+            annotated, qr_value, qr_coords = self._process_qr(annotated, scale_x, scale_y)
 
             if qr_value:
-                self._publish_detection('ar_code', qr_value)
+                x3d = qr_coords[0] if qr_coords else None
+                y3d = qr_coords[1] if qr_coords else None
+                z3d = qr_coords[2] if qr_coords else None
+                self._publish_detection('ar_code', qr_value, x=x3d, y=y3d, z=z3d)
                 self.get_logger().info(f'QR detectado: {qr_value}')
 
             with self.lock:
