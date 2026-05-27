@@ -22,7 +22,7 @@ HAZMAT_CLASSES = {
 }
 
 REAL_OBJECT_CLASSES = {
-    'Backpack', 'fire_extinguisher', 'gas tank', 'helmet',
+    'Backpack', 'fire_extinguisher', 'gas tank', 'Helmet',
 }
 
 YEAR               = '2026'
@@ -30,8 +30,15 @@ TEAM_NAME          = 'NIXITO'
 COUNTRY            = 'Mexico'
 ROBOT              = 'Nixito'
 MODE               = 'T'
-QR_HOLD_SECS       = 0.5
+QR_HOLD_SECS       = 0.1
+QR_MIN_PERIOD      = 0.05   # s → ~20 fps máximo para detección activa
+QR_DETECT_WIDTH    = 640    # Resolución de trabajo para WeChat
+QR_MIN_AREA        = 400
+QR_MAX_RATIO       = 0.50
 DETECTION_COOLDOWN = 20.0
+
+# Directorio de modelos CNN para WeChatQRCode (detección robusta + super-resolución)
+QR_MODEL_DIR = '/home/angel/qr_models'
 
 PKG_DIR      = Path('/home/angel/NXL_Robocup/src/nixito_perception/nixito_perception/csv')
 MISSION_FILE = PKG_DIR / 'mission.txt'
@@ -56,7 +63,7 @@ class DetectorNode(Node):
         self.get_logger().info(f'Modelo cargado: {model_path}')
 
         self.bridge = CvBridge()
-        self.detection_counts = {}
+        self.detection_counts  = {}
         self.detection_counter = 0
         self._last_published_time = {}
 
@@ -70,28 +77,39 @@ class DetectorNode(Node):
         self.camera_info = None
         self.fx = self.fy = self.cx = self.cy = None
 
-        # QR
-        self.qr_detector    = cv2.QRCodeDetector()
-        self._clahe         = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        self._gamma_lut     = self._build_gamma_lut(gamma=1.5)
+        # ── WeChatQRCode ──────────────────────────────────────────────────────
+        self.get_logger().info('Inicializando WeChatQRCode …')
+        try:
+            d  = f'{QR_MODEL_DIR}/detect.prototxt'
+            dc = f'{QR_MODEL_DIR}/detect.caffemodel'
+            s  = f'{QR_MODEL_DIR}/sr.prototxt'
+            sc = f'{QR_MODEL_DIR}/sr.caffemodel'
+            self.qr_detector = cv2.wechat_qrcode_WeChatQRCode(d, dc, s, sc)
+            self.get_logger().info('WeChatQRCode cargado con modelos CNN.')
+        except Exception as e:
+            self.get_logger().warn(
+                f'No se pudieron cargar modelos WeChat CNN ({e}). '
+                f'Usando modo sin modelos — descarga los .prototxt/.caffemodel en {QR_MODEL_DIR}.'
+            )
+            self.qr_detector = cv2.wechat_qrcode_WeChatQRCode()
+
+        self._last_qr_time  = 0.0
         self._qr_last_value = ''
-        self._qr_last_pts   = None
+        self._qr_last_pts   = None   # coords en el frame anotado (640×360)
         self._qr_last_seen  = 0.0
         self._qr_published  = set()
 
-        # CSV
+        # ── CSV ───────────────────────────────────────────────────────────────
         self.csv_file, self.csv_writer = self._init_csv()
 
         self.pub       = self.create_publisher(String, 'detection/name', 10)
         self.image_pub = self.create_publisher(Image, 'detection/annotated', 10)
 
         self.create_subscription(Image, image_topic, self.image_callback, 10)
-
         self.create_subscription(
             CameraInfo,
             '/camera/camera/color/camera_info',
             self.info_callback, 10)
-
         self.create_subscription(
             Image,
             '/camera/camera/aligned_depth_to_color/image_raw',
@@ -243,44 +261,17 @@ class DetectorNode(Node):
         self.pub.publish(out)
         self.get_logger().info(f'Publicado: {out.data}')
 
-    # ── Pipeline QR ───────────────────────────────────────────────────────────
+    # ── Pipeline QR — WeChatQRCode ────────────────────────────────────────────
 
-    def _build_gamma_lut(self, gamma: float = 1.5) -> np.ndarray:
-        inv_gamma = 1.0 / gamma
-        table = np.array([
-            ((i / 255.0) ** inv_gamma) * 255
-            for i in range(256)
-        ], dtype=np.uint8)
-        return table
-
-    def _preprocess_for_qr(self, frame: np.ndarray):
-        h, w  = frame.shape[:2]
-        small = cv2.resize(frame, (w // 2, h // 2))
-        scale = (w / (w // 2), h / (h // 2))
-
-        gray      = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        gray      = self._clahe.apply(gray)
-        gray      = cv2.bilateralFilter(gray, 5, 75, 75)
-        blur      = cv2.GaussianBlur(gray, (0, 0), 3)
-        sharpened = cv2.addWeighted(gray, 2.5, blur, -1.5, 0)
-
-        thresh = cv2.adaptiveThreshold(
-            sharpened, 255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
-            11, 2,
-        )
-
-        gamma = cv2.LUT(gray, self._gamma_lut) if np.mean(gray) < 80 else sharpened
-        return [frame, thresh, cv2.bitwise_not(thresh), gamma], scale
-
-    def _validate_qr(self, value: str, pts, frame_shape) -> bool:
+    def _validate_qr(self, value: str, pts: np.ndarray, frame_shape: tuple) -> bool:
+        """Filtra detecciones espurias."""
         if not value or not value.strip():
             return False
         pts_i       = np.int32(pts).reshape(-1, 2)
         x, y, w, h = cv2.boundingRect(pts_i)
         area        = w * h
         fh, fw      = frame_shape[:2]
-        if area < 400 or area / (fw * fh) > 0.5:
+        if area < QR_MIN_AREA or area / (fw * fh) > QR_MAX_RATIO:
             return False
         if h == 0 or abs(w / h - 1.0) > 0.3:
             return False
@@ -289,71 +280,109 @@ class DetectorNode(Node):
         return True
 
     def _process_qr(self, frame: np.ndarray, scale_x: float, scale_y: float) -> tuple:
-        t0 = time.time()
-        variants, (sx, sy) = self._preprocess_for_qr(frame)
-        value, pts = '', None
+        """
+        Detecta QR con WeChatQRCode sobre el frame anotado (640×360).
 
-        for i, img in enumerate(variants):
-            try:
-                v, p, _ = self.qr_detector.detectAndDecode(img)
-            except cv2.error:
+        - scale_x / scale_y convierten coords del frame anotado al frame original
+          para la consulta de profundidad (pixel_to_3d).
+        - Devuelve (frame_anotado, qr_value_nuevo | None, qr_coords_3d | None).
+        """
+        t0  = time.time()
+        now = t0
+        age = now - self._qr_last_seen
+
+        # Rate limiting: si el hold sigue vigente y no pasó QR_MIN_PERIOD,
+        # solo dibujamos el resultado cacheado sin llamar al detector.
+        if age < QR_HOLD_SECS and (now - self._last_qr_time) < QR_MIN_PERIOD:
+            self._draw_qr_overlay(frame, age, scale_x, scale_y)
+            return frame, None, None
+
+        self._last_qr_time = now
+
+        # WeChat trabaja bien a 640 px de ancho; el frame ya llega a 640×360,
+        # así que lo usamos directamente sin reescalar (scale_wechat = 1.0).
+        h, w      = frame.shape[:2]
+        wechat_w  = QR_DETECT_WIDTH
+        wc_scale  = wechat_w / w          # ≈ 1.0 si w ya es 640
+
+        if wc_scale < 1.0:
+            small_qr = cv2.resize(frame, (wechat_w, int(h * wc_scale)),
+                                  interpolation=cv2.INTER_AREA)
+        else:
+            small_qr = frame              # sin copia extra
+
+        try:
+            texts, points = self.qr_detector.detectAndDecode(small_qr)
+        except cv2.error as e:
+            self.get_logger().warn(f'WeChat detectAndDecode error: {e}')
+            texts, points = [], []
+
+        # Tomar el primer QR válido; proyectar puntos al frame anotado (640×360)
+        value, pts_ann = '', None
+        for text, pt in zip(texts, points):
+            if not text:
                 continue
-            if p is None or len(p) == 0:
-                continue
-            if cv2.contourArea(np.int32(p).reshape(-1, 2)) <= 0:
-                continue
-            if v:
-                value, pts = v, p * ([sx, sy] if i > 0 else [1, 1])
+            pts_in_frame = pt / wc_scale   # coords en el frame anotado (640×360)
+            if self._validate_qr(text, pts_in_frame, frame.shape):
+                value    = text
+                pts_ann  = pts_in_frame
                 break
 
         new_detection = None
         qr_coords     = None
 
-        if pts is not None and self._validate_qr(value, pts, frame.shape):
+        if pts_ann is not None:
             self._qr_last_value = value
-            self._qr_last_pts   = pts
-            self._qr_last_seen  = time.time()
+            self._qr_last_pts   = pts_ann
+            self._qr_last_seen  = now
 
             if value not in self._qr_published:
                 self._qr_published.add(value)
                 new_detection = value
 
-                pts_i      = np.int32(pts).reshape(-1, 2)
+                # Centro del QR en el frame anotado → coords originales → 3D
+                pts_i      = np.int32(pts_ann).reshape(-1, 2)
                 qr_cx_ann  = int(pts_i[:, 0].mean())
                 qr_cy_ann  = int(pts_i[:, 1].mean())
-
                 qr_cx_orig = int(qr_cx_ann * scale_x)
                 qr_cy_orig = int(qr_cy_ann * scale_y)
                 qr_coords  = self.pixel_to_3d(qr_cx_orig, qr_cy_orig)
 
-        age = time.time() - self._qr_last_seen
-        if age < QR_HOLD_SECS and self._qr_last_pts is not None:
-            pts_i        = np.int32(self._qr_last_pts).reshape(-1, 2)
-            x, y, bw, bh = cv2.boundingRect(pts_i)
-            qr_cx_ann    = x + bw // 2
-            qr_cy_ann    = y + bh // 2
-
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (x, y), (x + bw, y + bh), (0, 255, 0), -1)
-            cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
-            cv2.rectangle(frame, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
-
-            label = self._qr_last_value[:40] + ('…' if len(self._qr_last_value) > 40 else '')
-            cv2.putText(frame, label, (x, max(y - 22, 20)),
-                        cv2.FONT_HERSHEY_TRIPLEX, 0.65, (255, 255, 255), 2)
-
-            # Distancia en el frame junto al centro del QR
-            qr_cx_orig_rt = int(qr_cx_ann * scale_x)
-            qr_cy_orig_rt = int(qr_cy_ann * scale_y)
-            rt_coords     = self.pixel_to_3d(qr_cx_orig_rt, qr_cy_orig_rt)
-            if rt_coords is not None:
-                cv2.circle(frame, (qr_cx_ann, qr_cy_ann), 6, (0, 0, 255), -1)
-                cv2.putText(frame, f'{rt_coords[2]:.2f}m',
-                            (qr_cx_ann + 8, qr_cy_ann),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-
+        age = now - self._qr_last_seen
+        self._draw_qr_overlay(frame, age, scale_x, scale_y)
         return frame, new_detection, qr_coords
+
+    def _draw_qr_overlay(self, frame: np.ndarray, age: float,
+                         scale_x: float, scale_y: float) -> None:
+        if age >= QR_HOLD_SECS or self._qr_last_pts is None:
+            return
+
+        pts_i        = np.int32(self._qr_last_pts).reshape(-1, 2)
+        x, y, bw, bh = cv2.boundingRect(pts_i)
+
+        # Fondo semitransparente
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x, y), (x + bw, y + bh), (0, 255, 0), -1)
+        cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
+
+        # Borde y etiqueta
+        cv2.rectangle(frame, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
+        label = self._qr_last_value[:40] + ('…' if len(self._qr_last_value) > 40 else '')
+        cv2.putText(frame, label, (x, max(y - 22, 20)),
+                    cv2.FONT_HERSHEY_TRIPLEX, 0.65, (255, 255, 255), 2)
+
+        # ── Punto rojo en el centro + distancia (consistente con YOLO) ────────
+        qr_cx_ann  = x + bw // 2
+        qr_cy_ann  = y + bh // 2
+        qr_cx_orig = int(qr_cx_ann * scale_x)
+        qr_cy_orig = int(qr_cy_ann * scale_y)
+        rt_coords  = self.pixel_to_3d(qr_cx_orig, qr_cy_orig)
+
+        cv2.circle(frame, (qr_cx_ann, qr_cy_ann), 6, (0, 0, 255), -1)
+        dist_text = f'{rt_coords[2]:.2f}m' if rt_coords is not None else '--'
+        cv2.putText(frame, dist_text,
+                    (qr_cx_ann + 8, qr_cy_ann),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
 
@@ -404,7 +433,6 @@ class DetectorNode(Node):
                 coords_3d = self.pixel_to_3d(cx_orig, cy_orig)
                 dist_m    = coords_3d[2] if coords_3d is not None else None
 
-                # Punto rojo y distancia en el frame (igual que perception_node)
                 cv2.circle(annotated, (cx_ann, cy_ann), 6, (0, 0, 255), -1)
                 cv2.putText(annotated,
                             f'{dist_m:.2f}m' if dist_m is not None else '--',
@@ -416,8 +444,6 @@ class DetectorNode(Node):
 
                 if count >= self.min_confirmations:
                     detection_type = self.get_detection_type(name)
-                    #x3d = coords_3d[0] if coords_3d else None
-                    #y3d = coords_3d[1] if coords_3d else None
                     z3d = coords_3d[2] if coords_3d else None
 
                     if detection_type != 'unknown':
@@ -435,8 +461,6 @@ class DetectorNode(Node):
             annotated, qr_value, qr_coords = self._process_qr(annotated, scale_x, scale_y)
 
             if qr_value:
-                #x3d = qr_coords[0] if qr_coords else None
-                #y3d = qr_coords[1] if qr_coords else None
                 z3d = qr_coords[2] if qr_coords else None
                 self._publish_detection('ar_code', qr_value, x=0, y=0, z=z3d)
                 self.get_logger().info(f'QR detectado: {qr_value}')
