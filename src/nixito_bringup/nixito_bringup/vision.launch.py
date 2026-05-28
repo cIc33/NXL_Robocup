@@ -1,32 +1,29 @@
 from launch import LaunchDescription
-from launch.actions import EmitEvent
-from launch_ros.actions import Node
-from launch_ros.actions import LifecycleNode
+from launch.actions import EmitEvent, ExecuteProcess, RegisterEventHandler
+from launch_ros.actions import Node, LifecycleNode
 from launch_ros.events.lifecycle import ChangeState
-from launch.actions import ExecuteProcess, EmitEvent, RegisterEventHandler
-from lifecycle_msgs.msg import Transition
 from launch.event_handlers import OnProcessIO
-import xacro
-from ament_index_python.packages import get_package_share_directory
-import os
+from lifecycle_msgs.msg import Transition
 
 
 def generate_launch_description():
+
     restart_gopro = ExecuteProcess(
         cmd=['curl', '-s', 'http://172.23.197.51:8080/gp/gpWebcam/STOP'],
         output='screen'
     )
-    
+
     gopro = ExecuteProcess(
         cmd=['sudo', './gopro', 'webcam', '-a', '-n', '-r', '480', '-i', '172.23.197.51'],
-        cwd='/home/aicistemthor/v4l2loopback/gopro_as_webcam_on_linux',
+        cwd='/home/angel/gopro_as_webcam_on_linux',
         output='screen'
     )
 
-
-    ffplay = ExecuteProcess(
-        cmd=['ffplay', '/dev/video42'],
-        output='screen'
+    gopro_camera = Node(
+        package='nixito_perception',
+        executable='gopro',
+        name='gopro_camera',
+        output='screen',
     )
 
     vision_node = LifecycleNode(
@@ -41,7 +38,7 @@ def generate_launch_description():
         package='nixito_perception',
         executable='vision_maze',
         name='vision_maze',
-        namespace='',
+        namespace='maze',
         output='screen'
     )
 
@@ -62,23 +59,29 @@ def generate_launch_description():
         }]
     )
 
-    ffplay_launched = [False]
+    # ── Esperar que ffmpeg confirme que está escribiendo al device ──────
+    camera_launched = [False]
 
     def check_video_ready(event):
-        if ffplay_launched[0]:
-            return[]
-        if 'video4linux2' in event.text.decode():
-            ffplay_launched[0] = True
-            return[ffplay]
-        return[]
-    
+        if camera_launched[0]:
+            return []
+        try:
+            text = event.text.decode(errors='ignore')
+        except Exception:
+            return []
+        # Esta línea aparece en stderr de ffmpeg justo cuando empieza
+        # a escribir frames a /dev/video42
+        if 'video4linux2' in text:
+            camera_launched[0] = True
+            return [gopro_camera]
+        return []
+
     esperar_video = RegisterEventHandler(
         OnProcessIO(
             target_action=gopro,
             on_stderr=check_video_ready
         )
     )
-    
 
     return LaunchDescription([
         restart_gopro,

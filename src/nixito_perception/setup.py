@@ -27,6 +27,7 @@ setup(
             'arm_camera = nixito_perception.test_cam1:main',
             'vision = nixito_perception.vision:main',
             'vision_maze = nixito_perception.vision_maze:main',
+            'gopro = nixito_perception.gopro:main',
         ],
     },
 )
