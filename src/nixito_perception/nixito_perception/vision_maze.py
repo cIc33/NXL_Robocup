@@ -13,6 +13,8 @@ import numpy as np
 import time
 
 
+# ── Clases ────────────────────────────────────────────────────────────────────
+
 HAZMAT_CLASSES = {
     '1.1 Explosives', '1.5 Blasting Agents', '2 Flamable gas',
     '2 Non-Flamable gas', '2 Oxygen', '3 Fuel Oil',
@@ -25,52 +27,60 @@ REAL_OBJECT_CLASSES = {
     'Backpack', 'fire_extinguisher', 'gas tank', 'Helmet',
 }
 
+# ── Configuración general ─────────────────────────────────────────────────────
+
 YEAR               = '2026'
 TEAM_NAME          = 'NIXITO'
 COUNTRY            = 'Mexico'
 ROBOT              = 'Nixito'
 MODE               = 'T'
 QR_HOLD_SECS       = 0.1
-QR_MIN_PERIOD      = 0.05   # s → ~20 fps máximo para detección activa
-QR_DETECT_WIDTH    = 640    # Resolución de trabajo para WeChat
-QR_MIN_AREA        = 400
+QR_MIN_PERIOD      = 0.05
+QR_DETECT_WIDTH    = 640
+QR_MIN_AREA        = 100
 QR_MAX_RATIO       = 0.50
 DETECTION_COOLDOWN = 20.0
 
-# Directorio de modelos CNN para WeChatQRCode (detección robusta + super-resolución)
 QR_MODEL_DIR = '/home/angel/qr_models'
 
 PKG_DIR      = Path('/home/angel/NXL_Robocup/src/nixito_perception/nixito_perception/csv')
 MISSION_FILE = PKG_DIR / 'mission.txt'
 CSV_DIR      = PKG_DIR / 'csv'
 
+# Intervalo (s) con el que se revisan los conteos de suscriptores
+TIMER_CHECK_SUBS = 2.0
+
 
 class DetectorNode(Node):
     def __init__(self):
         super().__init__('detector_node')
 
-        self.declare_parameter('model_path', '/home/angel/NXL_Robocup/src/nixito_perception/modelos/Robocup_NXL.pt')
+        # ── Parámetros ────────────────────────────────────────────────────────
+        self.declare_parameter('model_path',
+            '/home/angel/NXL_Robocup/src/nixito_perception/modelos/Robocup_NXL.pt')
         self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
         self.declare_parameter('confidence_threshold', 0.75)
         self.declare_parameter('min_confirmations', 5)
 
-        model_path   = self.get_parameter('model_path').value
-        image_topic  = self.get_parameter('image_topic').value
+        model_path               = self.get_parameter('model_path').value
+        image_topic              = self.get_parameter('image_topic').value
         self.confidence_threshold = self.get_parameter('confidence_threshold').value
-        self.min_confirmations    = self.get_parameter('min_confirmations').value
+        self.min_confirmations   = self.get_parameter('min_confirmations').value
 
+        # ── Modelo YOLO ───────────────────────────────────────────────────────
         self.model = YOLO(model_path)
         self.get_logger().info(f'Modelo cargado: {model_path}')
 
-        self.bridge = CvBridge()
-        self.detection_counts  = {}
-        self.detection_counter = 0
+        # ── Estado interno ────────────────────────────────────────────────────
+        self.bridge              = CvBridge()
+        self.detection_counts    = {}
+        self.detection_counter   = 0
         self._last_published_time = {}
 
         self.latest_frame   = None
         self.latest_header  = None
         self.last_annotated = None
-        self.lock = threading.Lock()
+        self.lock           = threading.Lock()
 
         # ── Profundidad ───────────────────────────────────────────────────────
         self.depth_image = None
@@ -95,30 +105,55 @@ class DetectorNode(Node):
 
         self._last_qr_time  = 0.0
         self._qr_last_value = ''
-        self._qr_last_pts   = None   # coords en el frame anotado (640×360)
+        self._qr_last_pts   = None
         self._qr_last_seen  = 0.0
         self._qr_published  = set()
 
         # ── CSV ───────────────────────────────────────────────────────────────
         self.csv_file, self.csv_writer = self._init_csv()
 
-        self.pub       = self.create_publisher(String, 'detection/name', 10)
-        self.image_pub = self.create_publisher(Image, 'detection/annotated', 10)
+        # ── Publicadores ──────────────────────────────────────────────────────
+        self.pub       = self.create_publisher(String, 'detection/name',      10)
+        self.image_pub = self.create_publisher(Image,  'detection/annotated', 10)
 
-        self.create_subscription(Image, image_topic, self.image_callback, 10)
-        self.create_subscription(
-            CameraInfo,
-            '/camera/camera/color/camera_info',
-            self.info_callback, 10)
-        self.create_subscription(
-            Image,
-            '/camera/camera/aligned_depth_to_color/image_raw',
-            self.depth_callback, 10)
+        # ── Suscripciones de sensor ───────────────────────────────────────────
+        self.create_subscription(Image,      image_topic,                                  self.image_callback, 10)
+        self.create_subscription(CameraInfo, '/camera/camera/color/camera_info',           self.info_callback,  10)
+        self.create_subscription(Image,      '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
 
+        # ── Timer: revisión de suscriptores ───────────────────────────────────
+        # Activa o desactiva el procesamiento según si alguien está escuchando.
+        self._processing_active = False
+        self.create_timer(TIMER_CHECK_SUBS, self._check_subscribers)
+
+        # ── Hilo de inferencia ────────────────────────────────────────────────
         self.inference_thread = threading.Thread(target=self.inference_loop, daemon=True)
         self.inference_thread.start()
 
-        self.get_logger().info('Nodo iniciado')
+        self.get_logger().info('Nodo iniciado — esperando suscriptores …')
+
+    # ── Revisión de suscriptores ──────────────────────────────────────────────
+
+    def _check_subscribers(self) -> None:
+        """
+        Activa el procesamiento si algún tópico de salida tiene suscriptores;
+        lo desactiva (y resetea contadores) cuando no hay ninguno.
+        Refleja la lógica de _check_subscribers de VisionNode.
+        """
+        has_subs = (
+            self.pub.get_subscription_count()       > 0 or
+            self.image_pub.get_subscription_count() > 0
+        )
+
+        if has_subs and not self._processing_active:
+            self._processing_active = True
+            self.get_logger().info('Suscriptor detectado — procesamiento ACTIVO')
+
+        elif not has_subs and self._processing_active:
+            self._processing_active = False
+            # Resetear contadores para no arrastrar detecciones antiguas
+            self.detection_counts.clear()
+            self.get_logger().info('Sin suscriptores — procesamiento INACTIVO')
 
     # ── Profundidad ───────────────────────────────────────────────────────────
 
@@ -248,23 +283,28 @@ class DetectorNode(Node):
         y_str = f'{y:.3f}' if y is not None else ' '
         z_str = f'{z:.3f}' if z is not None else ' '
 
-        out      = String()
-        out.data = (
-            f'{self.detection_counter},'
-            f'{timestamp},'
-            f'{detection_type},'
-            f'"{name}",'
-            f'{x_str},{y_str},{z_str},'
-            f'{ROBOT},'
-            f'{MODE}'
-        )
-        self.pub.publish(out)
-        self.get_logger().info(f'Publicado: {out.data}')
+        # ── Solo publicar en detection/name si hay suscriptores ───────────────
+        if self.pub.get_subscription_count() > 0:
+            out      = String()
+            out.data = (
+                f'{self.detection_counter},'
+                f'{timestamp},'
+                f'{detection_type},'
+                f'"{name}",'
+                f'{x_str},{y_str},{z_str},'
+                f'{ROBOT},'
+                f'{MODE}'
+            )
+            self.pub.publish(out)
+            self.get_logger().info(f'Publicado: {out.data}')
+        else:
+            self.get_logger().debug(
+                f'Detección registrada en CSV pero sin suscriptores: {name}'
+            )
 
-    # ── Pipeline QR — WeChatQRCode ────────────────────────────────────────────
+    # ── Pipeline QR ───────────────────────────────────────────────────────────
 
     def _validate_qr(self, value: str, pts: np.ndarray, frame_shape: tuple) -> bool:
-        """Filtra detecciones espurias."""
         if not value or not value.strip():
             return False
         pts_i       = np.int32(pts).reshape(-1, 2)
@@ -280,36 +320,25 @@ class DetectorNode(Node):
         return True
 
     def _process_qr(self, frame: np.ndarray, scale_x: float, scale_y: float) -> tuple:
-        """
-        Detecta QR con WeChatQRCode sobre el frame anotado (640×360).
-
-        - scale_x / scale_y convierten coords del frame anotado al frame original
-          para la consulta de profundidad (pixel_to_3d).
-        - Devuelve (frame_anotado, qr_value_nuevo | None, qr_coords_3d | None).
-        """
         t0  = time.time()
         now = t0
         age = now - self._qr_last_seen
 
-        # Rate limiting: si el hold sigue vigente y no pasó QR_MIN_PERIOD,
-        # solo dibujamos el resultado cacheado sin llamar al detector.
         if age < QR_HOLD_SECS and (now - self._last_qr_time) < QR_MIN_PERIOD:
             self._draw_qr_overlay(frame, age, scale_x, scale_y)
             return frame, None, None
 
         self._last_qr_time = now
 
-        # WeChat trabaja bien a 640 px de ancho; el frame ya llega a 640×360,
-        # así que lo usamos directamente sin reescalar (scale_wechat = 1.0).
         h, w      = frame.shape[:2]
         wechat_w  = QR_DETECT_WIDTH
-        wc_scale  = wechat_w / w          # ≈ 1.0 si w ya es 640
+        wc_scale  = wechat_w / w
 
         if wc_scale < 1.0:
             small_qr = cv2.resize(frame, (wechat_w, int(h * wc_scale)),
                                   interpolation=cv2.INTER_AREA)
         else:
-            small_qr = frame              # sin copia extra
+            small_qr = frame
 
         try:
             texts, points = self.qr_detector.detectAndDecode(small_qr)
@@ -317,15 +346,14 @@ class DetectorNode(Node):
             self.get_logger().warn(f'WeChat detectAndDecode error: {e}')
             texts, points = [], []
 
-        # Tomar el primer QR válido; proyectar puntos al frame anotado (640×360)
         value, pts_ann = '', None
         for text, pt in zip(texts, points):
             if not text:
                 continue
-            pts_in_frame = pt / wc_scale   # coords en el frame anotado (640×360)
+            pts_in_frame = pt / wc_scale
             if self._validate_qr(text, pts_in_frame, frame.shape):
-                value    = text
-                pts_ann  = pts_in_frame
+                value   = text
+                pts_ann = pts_in_frame
                 break
 
         new_detection = None
@@ -340,7 +368,6 @@ class DetectorNode(Node):
                 self._qr_published.add(value)
                 new_detection = value
 
-                # Centro del QR en el frame anotado → coords originales → 3D
                 pts_i      = np.int32(pts_ann).reshape(-1, 2)
                 qr_cx_ann  = int(pts_i[:, 0].mean())
                 qr_cy_ann  = int(pts_i[:, 1].mean())
@@ -360,18 +387,15 @@ class DetectorNode(Node):
         pts_i        = np.int32(self._qr_last_pts).reshape(-1, 2)
         x, y, bw, bh = cv2.boundingRect(pts_i)
 
-        # Fondo semitransparente
         overlay = frame.copy()
         cv2.rectangle(overlay, (x, y), (x + bw, y + bh), (0, 255, 0), -1)
         cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
 
-        # Borde y etiqueta
         cv2.rectangle(frame, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
         label = self._qr_last_value[:40] + ('…' if len(self._qr_last_value) > 40 else '')
         cv2.putText(frame, label, (x, max(y - 22, 20)),
                     cv2.FONT_HERSHEY_TRIPLEX, 0.65, (255, 255, 255), 2)
 
-        # ── Punto rojo en el centro + distancia (consistente con YOLO) ────────
         qr_cx_ann  = x + bw // 2
         qr_cy_ann  = y + bh // 2
         qr_cx_orig = int(qr_cx_ann * scale_x)
@@ -394,13 +418,22 @@ class DetectorNode(Node):
             self.latest_header = msg.header
             annotated          = self.last_annotated
 
-        annotated_msg = self.bridge.cv2_to_imgmsg(
-            annotated if annotated is not None else frame, encoding='bgr8')
-        annotated_msg.header = msg.header
-        self.image_pub.publish(annotated_msg)
+        # ── Solo publicar el frame si hay suscriptores en detection/annotated ─
+        if self.image_pub.get_subscription_count() > 0:
+            annotated_msg        = self.bridge.cv2_to_imgmsg(
+                annotated if annotated is not None else frame, encoding='bgr8')
+            annotated_msg.header = msg.header
+            self.image_pub.publish(annotated_msg)
+
+    # ── Hilo de inferencia ────────────────────────────────────────────────────
 
     def inference_loop(self):
         while rclpy.ok():
+            # Saltar inferencia si nadie escucha — ahorra CPU/GPU
+            if not self._processing_active:
+                time.sleep(0.1)
+                continue
+
             with self.lock:
                 frame = self.latest_frame
 
@@ -412,6 +445,7 @@ class DetectorNode(Node):
             scale_y = orig_h / 360.0
 
             small     = cv2.resize(frame, (640, 360))
+            clean_small = small.copy() 
             results   = self.model(small, conf=self.confidence_threshold, imgsz=320, verbose=False)[0]
             annotated = results.plot()
 
@@ -426,7 +460,6 @@ class DetectorNode(Node):
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                 cx_ann  = int((x1 + x2) / 2)
                 cy_ann  = int((y1 + y2) / 2)
-
                 cx_orig = int(cx_ann * scale_x)
                 cy_orig = int(cy_ann * scale_y)
 
@@ -468,9 +501,8 @@ class DetectorNode(Node):
             with self.lock:
                 self.last_annotated = annotated
 
-            cv2.imshow('Detector', annotated)
-            cv2.waitKey(1)
 
+# ── Punto de entrada ──────────────────────────────────────────────────────────
 
 def main(args=None):
     rclpy.init(args=args)
@@ -480,7 +512,6 @@ def main(args=None):
     finally:
         node.csv_file.close()
         node.destroy_node()
-        cv2.destroyAllWindows()
         rclpy.shutdown()
 
 
