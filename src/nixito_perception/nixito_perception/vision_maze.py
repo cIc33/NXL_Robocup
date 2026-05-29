@@ -109,8 +109,10 @@ class DetectorNode(Node):
         self._qr_last_seen  = 0.0
         self._qr_published  = set()
 
-        # ── CSV ───────────────────────────────────────────────────────────────
-        self.csv_file, self.csv_writer = self._init_csv()
+        # ── CSV (se inicializa lazy al detectar el primer suscriptor) ─────────
+        self.csv_file   = None
+        self.csv_writer = None
+        self._csv_ready = False          # bandera: ¿ya se creó el CSV de esta sesión?
 
         # ── Publicadores ──────────────────────────────────────────────────────
         self.pub       = self.create_publisher(String, 'detection/name',      10)
@@ -122,7 +124,6 @@ class DetectorNode(Node):
         self.create_subscription(Image,      '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
 
         # ── Timer: revisión de suscriptores ───────────────────────────────────
-        # Activa o desactiva el procesamiento según si alguien está escuchando.
         self._processing_active = False
         self.create_timer(TIMER_CHECK_SUBS, self._check_subscribers)
 
@@ -136,9 +137,11 @@ class DetectorNode(Node):
 
     def _check_subscribers(self) -> None:
         """
-        Activa el procesamiento si algún tópico de salida tiene suscriptores;
-        lo desactiva (y resetea contadores) cuando no hay ninguno.
-        Refleja la lógica de _check_subscribers de VisionNode.
+        Activa el procesamiento cuando hay suscriptores.
+        La primera vez que se detecta un suscriptor se crea el CSV y se
+        incrementa el número de misión.  Al quedarse sin suscriptores se
+        desactiva el procesamiento y se resetean los contadores, pero el CSV
+        permanece abierto hasta que el nodo se destruye.
         """
         has_subs = (
             self.pub.get_subscription_count()       > 0 or
@@ -147,11 +150,17 @@ class DetectorNode(Node):
 
         if has_subs and not self._processing_active:
             self._processing_active = True
+
+            # ── Crear CSV la primera vez que aparece un suscriptor ────────────
+            if not self._csv_ready:
+                self.csv_file, self.csv_writer = self._init_csv()
+                self._csv_ready = True
+                self.get_logger().info('CSV creado al detectar el primer suscriptor.')
+
             self.get_logger().info('Suscriptor detectado — procesamiento ACTIVO')
 
         elif not has_subs and self._processing_active:
             self._processing_active = False
-            # Resetear contadores para no arrastrar detecciones antiguas
             self.detection_counts.clear()
             self.get_logger().info('Sin suscriptores — procesamiento INACTIVO')
 
@@ -203,8 +212,14 @@ class DetectorNode(Node):
         MISSION_FILE.write_text(str(current + 1))
 
     def _init_csv(self):
+        """
+        Lee el número de misión actual, incrementa el contador en disco y
+        crea el archivo CSV correspondiente.  Solo se llama cuando ya existe
+        al menos un suscriptor activo.
+        """
         mission_num = self._read_mission_number()
         self._increment_mission_number(mission_num)
+        self.current_mission_num = mission_num          # guardado para referencia
 
         now               = datetime.now()
         start_date        = now.strftime('%Y-%m-%d')
@@ -238,6 +253,13 @@ class DetectorNode(Node):
 
     def write_csv_row(self, detection_type: str, name: str,
                       x: float = None, y: float = None, z: float = None):
+        # Guardia: no escribir si el CSV aún no fue inicializado
+        if not self._csv_ready or self.csv_writer is None:
+            self.get_logger().warn(
+                f'CSV no listo — detección ignorada en disco: {name}'
+            )
+            return
+
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         self.csv_writer.writerow([
             self.detection_counter,
@@ -444,10 +466,10 @@ class DetectorNode(Node):
             scale_x = orig_w / 640.0
             scale_y = orig_h / 360.0
 
-            small     = cv2.resize(frame, (640, 360))
-            clean_small = small.copy() 
-            results   = self.model(small, conf=self.confidence_threshold, imgsz=320, verbose=False)[0]
-            annotated = results.plot()
+            small       = cv2.resize(frame, (640, 360))
+            clean_small = small.copy()
+            results     = self.model(small, conf=self.confidence_threshold, imgsz=320, verbose=False)[0]
+            annotated   = results.plot()
 
             detected_this_frame = set()
 
@@ -510,7 +532,8 @@ def main(args=None):
     try:
         rclpy.spin(node)
     finally:
-        node.csv_file.close()
+        if node.csv_file is not None:
+            node.csv_file.close()
         node.destroy_node()
         rclpy.shutdown()
 
