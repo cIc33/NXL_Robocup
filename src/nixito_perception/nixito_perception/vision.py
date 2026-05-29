@@ -21,7 +21,7 @@ YOLO_CONF        = 0.5
 YOLO_IMGSZ       = 480
 
 
-QR_MODEL_DIR      = "/home/angel/qr_models"   # ← ajusta si los pones en otro lugar
+QR_MODEL_DIR      = "/home/angel/NXL_Robocup/src/nixito_perception/drivers/qr_models"
 QR_HOLD_SECS      = 0.1
 QR_MIN_AREA       = 100
 QR_MAX_RATIO      = 0.50

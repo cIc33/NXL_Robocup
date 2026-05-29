@@ -41,7 +41,7 @@ QR_MIN_AREA        = 100
 QR_MAX_RATIO       = 0.50
 DETECTION_COOLDOWN = 20.0
 
-QR_MODEL_DIR = '/home/angel/qr_models'
+QR_MODEL_DIR = '/home/angel/NXL_Robocup/src/nixito_perception/drivers/qr_models'
 
 PKG_DIR      = Path('/home/angel/NXL_Robocup/src/nixito_perception/nixito_perception/csv')
 MISSION_FILE = PKG_DIR / 'mission.txt'
