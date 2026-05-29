@@ -4,7 +4,6 @@ from launch_ros.actions import Node, LifecycleNode
 from launch_ros.events.lifecycle import ChangeState
 from launch.event_handlers import OnProcessIO
 from lifecycle_msgs.msg import Transition
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 
 def generate_launch_description():
@@ -15,8 +14,7 @@ def generate_launch_description():
     )
 
     realsense = ExecuteProcess(
-        cmd=['ros2', 'launch', 'realsense2_camera', 'rs_launch.py',
-             'align_depth.enable:=true'],
+        cmd= ['ros2', 'launch', 'realsense2_camera', 'rs_launch.py', 'align_depth.enable:=true'],
         cwd='/home/angel',
         output='screen'
     )
@@ -32,12 +30,6 @@ def generate_launch_description():
         executable='gopro',
         name='gopro_camera',
         output='screen',
-        parameters=[{
-            'width': 640,
-            'height': 480,
-            'fps': 30,
-            'device': '/dev/video42',
-        }]
     )
 
     vision_node = LifecycleNode(
@@ -56,24 +48,23 @@ def generate_launch_description():
         output='screen'
     )
 
-    # Cámara trasera — ya está en 640x480, bien
     cam_trasera = Node(
         package='usb_cam',
-        executable='usb_cam_node_exe',
-        name='usb_cam',
+        executable="usb_cam_node_exe",
+        name="usb_cam",
         namespace='reversa',
         output='screen',
         parameters=[{
-            'video_device': '/dev/video8',
-            'image_width': 640,
-            'image_height': 480,
-            'framerate': 30.0,
-            'io_method': 'mmap',
-            'brightness': -1,
-            'contrast': -1,
-            'saturation': -1,
-            'sharpness': -1,
-            'autofocus': True,
+        'video_device': '/dev/video8',
+        'image_width': 640,
+        'image_height': 480,
+        'framerate': 30.0,
+        'io_method': 'mmap',
+        'brightness': -1,
+        'contrast': -1,
+        'saturation': -1,
+        'sharpness': -1,
+        'autofocus': True,
         }]
     )
 
@@ -90,11 +81,11 @@ def generate_launch_description():
         name='foxglove_bridge',
         parameters=[{
             'port': 8765,
-            'send_buffer_limit': 10000000,
+            'send_buffer_limit': 10000000
         }]
     )
 
-    # ── Esperar que ffmpeg confirme escritura a /dev/video42 ────────────
+    # ── Esperar que ffmpeg confirme que está escribiendo al device ──────
     camera_launched = [False]
 
     def check_video_ready(event):
@@ -104,6 +95,8 @@ def generate_launch_description():
             text = event.text.decode(errors='ignore')
         except Exception:
             return []
+        # Esta línea aparece en stderr de ffmpeg justo cuando empieza
+        # a escribir frames a /dev/video42
         if 'video4linux2' in text:
             camera_launched[0] = True
             return [gopro_camera]
@@ -119,7 +112,7 @@ def generate_launch_description():
     return LaunchDescription([
         restart_gopro,
         gopro,
-        esperar_video,       # lanza gopro_camera cuando ffmpeg esté listo
+        esperar_video,
         realsense,
         cam_trasera,
         foxglove,
