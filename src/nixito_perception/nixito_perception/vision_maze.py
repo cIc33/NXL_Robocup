@@ -24,7 +24,7 @@ HAZMAT_CLASSES = {
 }
 
 REAL_OBJECT_CLASSES = {
-    'Backpack', 'Fire Extinguisher', 'gas tank', 'Helmet',
+    'Backpack', 'Fire Extinguisher', 'Gas tank', 'Helmet', 'Baby',
 }
 
 # ── Configuración general ─────────────────────────────────────────────────────
