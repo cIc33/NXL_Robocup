@@ -41,13 +41,30 @@ QR_MIN_AREA        = 100
 QR_MAX_RATIO       = 0.50
 DETECTION_COOLDOWN = 20.0
 
+# ── Configuración AprilTag ────────────────────────────────────────────────────
+
+# Diccionarios AprilTag a detectar (se pueden activar/desactivar según la arena)
+APRILTAG_DICTS = {
+    'DICT_APRILTAG_36H11': cv2.aruco.DICT_APRILTAG_36H11,
+    'DICT_APRILTAG_36H10': cv2.aruco.DICT_APRILTAG_36H10,
+    'DICT_APRILTAG_25H9':  cv2.aruco.DICT_APRILTAG_25H9,
+    'DICT_APRILTAG_16H5':  cv2.aruco.DICT_APRILTAG_16H5,
+}
+
+# Tamaño lateral real del marcador en metros (ajustar según el marcador físico)
+APRILTAG_MARKER_SIZE_M = 0.15
+
+AT_MIN_AREA        = 400    # área mínima del bounding box en px² para validar
+AT_HOLD_SECS       = 0.15   # segundos que se mantiene el overlay tras perder detección
+AT_MIN_PERIOD      = 0.05   # intervalo mínimo entre llamadas al detector
+AT_DETECT_WIDTH    = 640    # resolución de trabajo para el detector
+
 QR_MODEL_DIR = '/home/angel/NXL_Robocup/src/nixito_perception/drivers/qr_models'
 
 PKG_DIR      = Path('/home/angel/NXL_Robocup/src/nixito_perception/nixito_perception/csv')
 MISSION_FILE = PKG_DIR / 'mission.txt'
 CSV_DIR      = PKG_DIR / 'csv'
 
-# Intervalo (s) con el que se revisan los conteos de suscriptores
 TIMER_CHECK_SUBS = 2.0
 
 
@@ -62,19 +79,19 @@ class DetectorNode(Node):
         self.declare_parameter('confidence_threshold', 0.75)
         self.declare_parameter('min_confirmations', 5)
 
-        model_path               = self.get_parameter('model_path').value
-        image_topic              = self.get_parameter('image_topic').value
+        model_path                = self.get_parameter('model_path').value
+        image_topic               = self.get_parameter('image_topic').value
         self.confidence_threshold = self.get_parameter('confidence_threshold').value
-        self.min_confirmations   = self.get_parameter('min_confirmations').value
+        self.min_confirmations    = self.get_parameter('min_confirmations').value
 
         # ── Modelo YOLO ───────────────────────────────────────────────────────
         self.model = YOLO(model_path)
         self.get_logger().info(f'Modelo cargado: {model_path}')
 
         # ── Estado interno ────────────────────────────────────────────────────
-        self.bridge              = CvBridge()
-        self.detection_counts    = {}
-        self.detection_counter   = 0
+        self.bridge               = CvBridge()
+        self.detection_counts     = {}
+        self.detection_counter    = 0
         self._last_published_time = {}
 
         self.latest_frame   = None
@@ -109,18 +126,29 @@ class DetectorNode(Node):
         self._qr_last_seen  = 0.0
         self._qr_published  = set()
 
+        # ── AprilTag ──────────────────────────────────────────────────────────
+        self.get_logger().info('Inicializando detectores AprilTag …')
+        self._at_detectors = self._build_apriltag_detectors()
+        self._at_params     = self._build_apriltag_params()
+        self._at_last_time  = 0.0
+        self._at_published  = set()          # "DICT_NAME:id" ya publicados (cooldown propio)
+        self._at_last_detections = {}        # "DICT_NAME:id" → {corners, center, seen_time}
+        self.get_logger().info(
+            f'AprilTag: {len(self._at_detectors)} diccionario(s) activos.'
+        )
+
         # ── CSV (se inicializa lazy al detectar el primer suscriptor) ─────────
         self.csv_file   = None
         self.csv_writer = None
-        self._csv_ready = False          # bandera: ¿ya se creó el CSV de esta sesión?
+        self._csv_ready = False
 
         # ── Publicadores ──────────────────────────────────────────────────────
         self.pub       = self.create_publisher(String, 'detection/name',      10)
         self.image_pub = self.create_publisher(Image,  'detection/annotated', 10)
 
         # ── Suscripciones de sensor ───────────────────────────────────────────
-        self.create_subscription(Image,      image_topic,                                  self.image_callback, 10)
-        self.create_subscription(CameraInfo, '/camera/camera/color/camera_info',           self.info_callback,  10)
+        self.create_subscription(Image,      image_topic,                                       self.image_callback, 10)
+        self.create_subscription(CameraInfo, '/camera/camera/color/camera_info',                self.info_callback,  10)
         self.create_subscription(Image,      '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
 
         # ── Timer: revisión de suscriptores ───────────────────────────────────
@@ -133,16 +161,31 @@ class DetectorNode(Node):
 
         self.get_logger().info('Nodo iniciado — esperando suscriptores …')
 
+    # ── Helpers AprilTag ──────────────────────────────────────────────────────
+
+    def _build_apriltag_detectors(self) -> dict:
+        """Crea un cv2.aruco.ArucoDetector por cada diccionario AprilTag."""
+        detectors = {}
+        for name, dict_id in APRILTAG_DICTS.items():
+            dictionary = cv2.aruco.getPredefinedDictionary(dict_id)
+            detectors[name] = cv2.aruco.ArucoDetector(dictionary, self._build_apriltag_params())
+        return detectors
+
+    @staticmethod
+    def _build_apriltag_params() -> cv2.aruco.DetectorParameters:
+        params = cv2.aruco.DetectorParameters()
+        # Refinamiento de esquinas con el algoritmo propio de AprilTag
+        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_APRILTAG
+        params.minMarkerPerimeterRate  = 0.02
+        params.maxMarkerPerimeterRate  = 4.0
+        params.polygonalApproxAccuracyRate = 0.05
+        params.minCornerDistanceRate   = 0.05
+        params.minDistanceToBorder     = 3
+        return params
+
     # ── Revisión de suscriptores ──────────────────────────────────────────────
 
     def _check_subscribers(self) -> None:
-        """
-        Activa el procesamiento cuando hay suscriptores.
-        La primera vez que se detecta un suscriptor se crea el CSV y se
-        incrementa el número de misión.  Al quedarse sin suscriptores se
-        desactiva el procesamiento y se resetean los contadores, pero el CSV
-        permanece abierto hasta que el nodo se destruye.
-        """
         has_subs = (
             self.pub.get_subscription_count()       > 0 or
             self.image_pub.get_subscription_count() > 0
@@ -150,13 +193,10 @@ class DetectorNode(Node):
 
         if has_subs and not self._processing_active:
             self._processing_active = True
-
-            # ── Crear CSV la primera vez que aparece un suscriptor ────────────
             if not self._csv_ready:
                 self.csv_file, self.csv_writer = self._init_csv()
                 self._csv_ready = True
                 self.get_logger().info('CSV creado al detectar el primer suscriptor.')
-
             self.get_logger().info('Suscriptor detectado — procesamiento ACTIVO')
 
         elif not has_subs and self._processing_active:
@@ -212,14 +252,9 @@ class DetectorNode(Node):
         MISSION_FILE.write_text(str(current + 1))
 
     def _init_csv(self):
-        """
-        Lee el número de misión actual, incrementa el contador en disco y
-        crea el archivo CSV correspondiente.  Solo se llama cuando ya existe
-        al menos un suscriptor activo.
-        """
         mission_num = self._read_mission_number()
         self._increment_mission_number(mission_num)
-        self.current_mission_num = mission_num          # guardado para referencia
+        self.current_mission_num = mission_num
 
         now               = datetime.now()
         start_date        = now.strftime('%Y-%m-%d')
@@ -253,7 +288,6 @@ class DetectorNode(Node):
 
     def write_csv_row(self, detection_type: str, name: str,
                       x: float = None, y: float = None, z: float = None):
-        # Guardia: no escribir si el CSV aún no fue inicializado
         if not self._csv_ready or self.csv_writer is None:
             self.get_logger().warn(
                 f'CSV no listo — detección ignorada en disco: {name}'
@@ -305,7 +339,6 @@ class DetectorNode(Node):
         y_str = f'{y:.3f}' if y is not None else ' '
         z_str = f'{z:.3f}' if z is not None else ' '
 
-        # ── Solo publicar en detection/name si hay suscriptores ───────────────
         if self.pub.get_subscription_count() > 0:
             out      = String()
             out.data = (
@@ -430,6 +463,150 @@ class DetectorNode(Node):
                     (qr_cx_ann + 8, qr_cy_ann),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
+    # ── Pipeline AprilTag ─────────────────────────────────────────────────────
+
+    def _process_apriltag(self, frame: np.ndarray, scale_x: float, scale_y: float) -> tuple:
+        """
+        Detecta AprilTags en `frame` (resolución anotada 640×360).
+        Retorna el frame anotado y una lista de nuevas detecciones:
+            [(tag_key, tag_label, coords_3d), ...]
+        Respeta:
+          - AT_MIN_PERIOD  : intervalo mínimo entre llamadas al detector
+          - AT_HOLD_SECS   : mantiene el overlay aunque el tag ya no se vea
+          - DETECTION_COOLDOWN: heredado de _publish_detection
+        """
+        now = time.time()
+
+        # ── Frecuencia de detección ───────────────────────────────────────────
+        if now - self._at_last_time < AT_MIN_PERIOD:
+            # Solo dibujar el overlay de la última detección conocida
+            self._draw_apriltag_overlays(frame, now, scale_x, scale_y)
+            return frame, []
+
+        self._at_last_time = now
+
+        # ── Preparar imagen de detección ──────────────────────────────────────
+        h, w     = frame.shape[:2]
+        at_scale = AT_DETECT_WIDTH / w
+        if at_scale < 1.0:
+            small_at = cv2.resize(frame, (AT_DETECT_WIDTH, int(h * at_scale)),
+                                  interpolation=cv2.INTER_AREA)
+        else:
+            small_at = frame
+            at_scale = 1.0
+
+        gray = cv2.cvtColor(small_at, cv2.COLOR_BGR2GRAY)
+
+        # ── Detección en todos los diccionarios ───────────────────────────────
+        new_detections = []
+        detected_keys  = set()
+
+        for dict_name, detector in self._at_detectors.items():
+            try:
+                corners_list, ids, _ = detector.detectMarkers(gray)
+            except cv2.error as e:
+                self.get_logger().warn(f'AprilTag detect error ({dict_name}): {e}')
+                continue
+
+            if ids is None:
+                continue
+
+            for corners, tag_id in zip(corners_list, ids.flatten()):
+                # Escalar esquinas de vuelta a resolución anotada
+                corners_frame = corners[0] / at_scale      # shape (4, 2)
+
+                # ── Validar por área ──────────────────────────────────────────
+                x_c, y_c, bw, bh = cv2.boundingRect(np.int32(corners_frame))
+                area = bw * bh
+                if area < AT_MIN_AREA:
+                    continue
+
+                tag_key   = f'{dict_name}:{tag_id}'   # clave interna (cooldown/dedup)
+                tag_label = str(int(tag_id))            # solo el número → va al CSV y topic
+                detected_keys.add(tag_key)
+
+                # Centro en frame anotado → pixel original
+                cx_ann  = int(corners_frame[:, 0].mean())
+                cy_ann  = int(corners_frame[:, 1].mean())
+                cx_orig = int(cx_ann * scale_x)
+                cy_orig = int(cy_ann * scale_y)
+
+                coords_3d = self.pixel_to_3d(cx_orig, cy_orig)
+
+                # ── Actualizar overlay ────────────────────────────────────────
+                self._at_last_detections[tag_key] = {
+                    'corners':   corners_frame,
+                    'center':    (cx_ann, cy_ann),
+                    'seen_time': now,
+                    'coords':    coords_3d,
+                    'label':     tag_label,
+                }
+
+                # ── Nueva detección (para publicar) ───────────────────────────
+                if tag_key not in self._at_published:
+                    self._at_published.add(tag_key)
+                    new_detections.append((tag_key, tag_label, coords_3d))
+                    self.get_logger().info(
+                        f'AprilTag detectado: {tag_label}  '
+                        f'dist={coords_3d[2]:.2f}m' if coords_3d else
+                        f'AprilTag detectado: {tag_label}  dist=--'
+                    )
+
+        # Limpiar de _at_last_detections los tags que llevan mucho sin verse
+        for key in list(self._at_last_detections.keys()):
+            if now - self._at_last_detections[key]['seen_time'] > AT_HOLD_SECS * 10:
+                del self._at_last_detections[key]
+
+        # ── Dibujar overlays ──────────────────────────────────────────────────
+        self._draw_apriltag_overlays(frame, now, scale_x, scale_y)
+
+        return frame, new_detections
+
+    def _draw_apriltag_overlays(self, frame: np.ndarray, now: float,
+                                scale_x: float, scale_y: float) -> None:
+        """Dibuja el overlay de todos los AprilTags visibles recientemente."""
+        for tag_key, info in self._at_last_detections.items():
+            age = now - info['seen_time']
+            if age > AT_HOLD_SECS:
+                continue
+
+            corners = np.int32(info['corners'])
+            cx, cy  = info['center']
+            label   = info['label']
+            coords  = info['coords']
+
+            # ── Relleno semitransparente ──────────────────────────────────────
+            overlay = frame.copy()
+            cv2.fillPoly(overlay, [corners], (255, 128, 0))
+            cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
+
+            # ── Contorno del marcador ─────────────────────────────────────────
+            cv2.polylines(frame, [corners], isClosed=True, color=(255, 128, 0), thickness=2)
+
+            # ── Ejes de las esquinas ──────────────────────────────────────────
+            for i, pt in enumerate(corners):
+                cv2.circle(frame, tuple(pt), 4, (0, 128, 255), -1)
+
+            # ── Punto central ─────────────────────────────────────────────────
+            cv2.circle(frame, (cx, cy), 6, (0, 0, 255), -1)
+
+            # ── Etiqueta: solo el ID numérico ─────────────────────────────────
+            x_b, y_b, bw, bh = cv2.boundingRect(corners)
+            cv2.putText(frame, f'AprilTag {label}',
+                        (x_b, max(y_b - 22, 20)),
+                        cv2.FONT_HERSHEY_TRIPLEX, 0.55, (255, 255, 255), 2)
+
+            # ── Distancia ─────────────────────────────────────────────────────
+            # Obtener distancia en tiempo real (no solo la del momento de detección)
+            cx_orig = int(cx * scale_x)
+            cy_orig = int(cy * scale_y)
+            rt_coords = self.pixel_to_3d(cx_orig, cy_orig)
+
+            dist_text = f'{rt_coords[2]:.2f}m' if rt_coords is not None else '--'
+            cv2.putText(frame, dist_text,
+                        (cx + 8, cy),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
     # ── Callbacks ─────────────────────────────────────────────────────────────
 
     def image_callback(self, msg: Image):
@@ -440,7 +617,6 @@ class DetectorNode(Node):
             self.latest_header = msg.header
             annotated          = self.last_annotated
 
-        # ── Solo publicar el frame si hay suscriptores en detection/annotated ─
         if self.image_pub.get_subscription_count() > 0:
             annotated_msg        = self.bridge.cv2_to_imgmsg(
                 annotated if annotated is not None else frame, encoding='bgr8')
@@ -451,7 +627,6 @@ class DetectorNode(Node):
 
     def inference_loop(self):
         while rclpy.ok():
-            # Saltar inferencia si nadie escucha — ahorra CPU/GPU
             if not self._processing_active:
                 time.sleep(0.1)
                 continue
@@ -467,12 +642,12 @@ class DetectorNode(Node):
             scale_y = orig_h / 360.0
 
             small       = cv2.resize(frame, (640, 360))
-            clean_small = small.copy()
             results     = self.model(small, conf=self.confidence_threshold, imgsz=320, verbose=False)[0]
             annotated   = results.plot()
 
             detected_this_frame = set()
 
+            # ── YOLO ──────────────────────────────────────────────────────────
             for box in results.boxes:
                 class_id   = int(box.cls.item())
                 confidence = float(box.conf.item())
@@ -513,12 +688,20 @@ class DetectorNode(Node):
                 if name not in detected_this_frame:
                     self.detection_counts[name] = 0
 
+            # ── QR ────────────────────────────────────────────────────────────
             annotated, qr_value, qr_coords = self._process_qr(annotated, scale_x, scale_y)
 
             if qr_value:
                 z3d = qr_coords[2] if qr_coords else None
                 self._publish_detection('ar_code', qr_value, x=0, y=0, z=z3d)
                 self.get_logger().info(f'QR detectado: {qr_value}')
+
+            # ── AprilTag ──────────────────────────────────────────────────────
+            annotated, at_detections = self._process_apriltag(annotated, scale_x, scale_y)
+
+            for tag_key, tag_label, at_coords in at_detections:
+                z3d = at_coords[2] if at_coords else None
+                self._publish_detection('ar_code', tag_label, x=0, y=0, z=z3d)
 
             with self.lock:
                 self.last_annotated = annotated
