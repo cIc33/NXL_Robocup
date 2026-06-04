@@ -15,7 +15,7 @@ from ultralytics import YOLO
 # ===========================================================================
 
 # ── YOLO ────────────────────────────────────────────────────────────────────
-YOLO_MODEL_PATH  = "/home/angel/NXL_Robocup/src/nixito_perception/modelos/Robocup_NXL.pt"
+YOLO_MODEL_PATH  = "/home/angel/NXL_Robocup/src/nixito_perception/modelos/Robocup_NXL_V2.pt"
 YOLO_MIN_PERIOD  = 0.05
 YOLO_CONF        = 0.5
 YOLO_IMGSZ       = 480

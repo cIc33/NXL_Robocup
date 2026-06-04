@@ -31,6 +31,13 @@ def generate_launch_description():
         name='gopro_camera',
         output='screen',
     )
+    thermal_camera = Node(
+        package='nixito_perception',
+        executable='thermal',
+        name='thermal_topdon',
+        namespace='Termica',
+        output='screen'
+    )
 
     vision_node = LifecycleNode(
         package='nixito_perception',
@@ -39,7 +46,7 @@ def generate_launch_description():
         namespace='',
         output='screen'
     )
-
+    
     vision_maze = LifecycleNode(
         package='nixito_perception',
         executable='vision_maze',
@@ -74,6 +81,12 @@ def generate_launch_description():
             transition_id=Transition.TRANSITION_CONFIGURE,
         )
     )
+    configure_maze = EmitEvent(
+    event=ChangeState(
+        lifecycle_node_matcher=lambda action: action == vision_maze,
+        transition_id=Transition.TRANSITION_CONFIGURE,
+    )
+)
 
     foxglove = Node(
         package='foxglove_bridge',
@@ -115,8 +128,10 @@ def generate_launch_description():
         esperar_video,
         realsense,
         cam_trasera,
+        thermal_camera,
         foxglove,
         vision_node,
         vision_maze,
         configure_vision,
+        configure_maze,
     ])

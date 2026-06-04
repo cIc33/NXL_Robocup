@@ -1,11 +1,13 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.lifecycle import LifecycleNode, Publisher, State, TransitionCallbackReturn
 from sensor_msgs.msg import Image, CameraInfo
 from std_msgs.msg import String
 from cv_bridge import CvBridge
 from ultralytics import YOLO
 from datetime import datetime
 from pathlib import Path
+from nixito_msgs.msg import Detection          # <── mensaje custom
 import threading
 import csv
 import cv2
@@ -43,7 +45,6 @@ DETECTION_COOLDOWN = 20.0
 
 # ── Configuración AprilTag ────────────────────────────────────────────────────
 
-# Diccionarios AprilTag a detectar (se pueden activar/desactivar según la arena)
 APRILTAG_DICTS = {
     'DICT_APRILTAG_36H11': cv2.aruco.DICT_APRILTAG_36H11,
     'DICT_APRILTAG_36H10': cv2.aruco.DICT_APRILTAG_36H10,
@@ -51,45 +52,27 @@ APRILTAG_DICTS = {
     'DICT_APRILTAG_16H5':  cv2.aruco.DICT_APRILTAG_16H5,
 }
 
-# Tamaño lateral real del marcador en metros (ajustar según el marcador físico)
 APRILTAG_MARKER_SIZE_M = 0.15
-
-AT_MIN_AREA        = 400    # área mínima del bounding box en px² para validar
-AT_HOLD_SECS       = 0.15   # segundos que se mantiene el overlay tras perder detección
-AT_MIN_PERIOD      = 0.05   # intervalo mínimo entre llamadas al detector
-AT_DETECT_WIDTH    = 640    # resolución de trabajo para el detector
+AT_MIN_AREA            = 400
+AT_HOLD_SECS           = 0.15
+AT_MIN_PERIOD          = 0.05
+AT_DETECT_WIDTH        = 640
 
 QR_MODEL_DIR = '/home/angel/NXL_Robocup/src/nixito_perception/drivers/qr_models'
+MODEL_PATH   = '/home/angel/NXL_Robocup/src/nixito_perception/modelos/Robocup_NXL.pt'
 
 PKG_DIR      = Path('/home/angel/NXL_Robocup/src/nixito_perception/nixito_perception/csv')
 MISSION_FILE = PKG_DIR / 'mission.txt'
 CSV_DIR      = PKG_DIR / 'csv'
 
-TIMER_CHECK_SUBS = 2.0
 
-
-class DetectorNode(Node):
+class DetectorNode(LifecycleNode):
     def __init__(self):
         super().__init__('detector_node')
 
-        # ── Parámetros ────────────────────────────────────────────────────────
-        self.declare_parameter('model_path',
-            '/home/angel/NXL_Robocup/src/nixito_perception/modelos/Robocup_NXL.pt')
-        self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
-        self.declare_parameter('confidence_threshold', 0.75)
-        self.declare_parameter('min_confirmations', 5)
-
-        model_path                = self.get_parameter('model_path').value
-        image_topic               = self.get_parameter('image_topic').value
-        self.confidence_threshold = self.get_parameter('confidence_threshold').value
-        self.min_confirmations    = self.get_parameter('min_confirmations').value
-
-        # ── Modelo YOLO ───────────────────────────────────────────────────────
-        self.model = YOLO(model_path)
-        self.get_logger().info(f'Modelo cargado: {model_path}')
-
-        # ── Estado interno ────────────────────────────────────────────────────
         self.bridge               = CvBridge()
+        self.model                = None
+        self.qr_detector          = None
         self.detection_counts     = {}
         self.detection_counter    = 0
         self._last_published_time = {}
@@ -98,27 +81,11 @@ class DetectorNode(Node):
         self.latest_header  = None
         self.last_annotated = None
         self.lock           = threading.Lock()
+        self._frame_event   = threading.Event()
 
-        # ── Profundidad ───────────────────────────────────────────────────────
         self.depth_image = None
         self.camera_info = None
         self.fx = self.fy = self.cx = self.cy = None
-
-        # ── WeChatQRCode ──────────────────────────────────────────────────────
-        self.get_logger().info('Inicializando WeChatQRCode …')
-        try:
-            d  = f'{QR_MODEL_DIR}/detect.prototxt'
-            dc = f'{QR_MODEL_DIR}/detect.caffemodel'
-            s  = f'{QR_MODEL_DIR}/sr.prototxt'
-            sc = f'{QR_MODEL_DIR}/sr.caffemodel'
-            self.qr_detector = cv2.wechat_qrcode_WeChatQRCode(d, dc, s, sc)
-            self.get_logger().info('WeChatQRCode cargado con modelos CNN.')
-        except Exception as e:
-            self.get_logger().warn(
-                f'No se pudieron cargar modelos WeChat CNN ({e}). '
-                f'Usando modo sin modelos — descarga los .prototxt/.caffemodel en {QR_MODEL_DIR}.'
-            )
-            self.qr_detector = cv2.wechat_qrcode_WeChatQRCode()
 
         self._last_qr_time  = 0.0
         self._qr_last_value = ''
@@ -126,94 +93,154 @@ class DetectorNode(Node):
         self._qr_last_seen  = 0.0
         self._qr_published  = set()
 
-        # ── AprilTag ──────────────────────────────────────────────────────────
-        self.get_logger().info('Inicializando detectores AprilTag …')
-        self._at_detectors = self._build_apriltag_detectors()
-        self._at_params     = self._build_apriltag_params()
-        self._at_last_time  = 0.0
-        self._at_published  = set()          # "DICT_NAME:id" ya publicados (cooldown propio)
-        self._at_last_detections = {}        # "DICT_NAME:id" → {corners, center, seen_time}
-        self.get_logger().info(
-            f'AprilTag: {len(self._at_detectors)} diccionario(s) activos.'
-        )
-
-        # ── CSV (se inicializa lazy al detectar el primer suscriptor) ─────────
         self.csv_file   = None
         self.csv_writer = None
         self._csv_ready = False
 
+        self.get_logger().info('Inicializando detectores AprilTag …')
+        self._at_detectors       = self._build_apriltag_detectors()
+        self._at_last_time       = 0.0
+        self._at_published       = set()
+        self._at_last_detections = {}
+
+        self._inference_thread = threading.Thread(
+            target=self._inference_loop, daemon=True
+        )
+        self._inference_thread.start()
+
+        self.get_logger().info('DetectorNode creado (UNCONFIGURED)')
+
+    # =========================================================================
+    # Ciclo de vida
+    # =========================================================================
+
+    def on_configure(self, state: State) -> TransitionCallbackReturn:
+        self.get_logger().info('Configurando …')
+
+        self.declare_parameter('model_path',           MODEL_PATH)
+        self.declare_parameter('image_topic',          '/camera/camera/color/image_raw')
+        self.declare_parameter('confidence_threshold', 0.75)
+        self.declare_parameter('min_confirmations',    5)
+
+        self._model_path          = self.get_parameter('model_path').value
+        self._image_topic         = self.get_parameter('image_topic').value
+        self.confidence_threshold = self.get_parameter('confidence_threshold').value
+        self.min_confirmations    = self.get_parameter('min_confirmations').value
+
         # ── Publicadores ──────────────────────────────────────────────────────
-        self.pub       = self.create_publisher(String, 'detection/name',      10)
-        self.image_pub = self.create_publisher(Image,  'detection/annotated', 10)
+        self._pub_detection = self.create_lifecycle_publisher(
+            Detection, 'detection', 10          # topic único con toda la info
+        )
+        self._pub_annotated = self.create_lifecycle_publisher(
+            Image, 'detection/annotated', 10
+        )
 
-        # ── Suscripciones de sensor ───────────────────────────────────────────
-        self.create_subscription(Image,      image_topic,                                       self.image_callback, 10)
-        self.create_subscription(CameraInfo, '/camera/camera/color/camera_info',                self.info_callback,  10)
-        self.create_subscription(Image,      '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
+        # ── Suscripciones ─────────────────────────────────────────────────────
+        self._sub_image = self.create_subscription(
+            Image, self._image_topic, self._image_callback, 10)
+        self._sub_info  = self.create_subscription(
+            CameraInfo, '/camera/camera/color/camera_info', self._info_callback, 10)
+        self._sub_depth = self.create_subscription(
+            Image, '/camera/camera/aligned_depth_to_color/image_raw',
+            self._depth_callback, 10)
 
-        # ── Timer: revisión de suscriptores ───────────────────────────────────
-        self._processing_active = False
-        self.create_timer(TIMER_CHECK_SUBS, self._check_subscribers)
+        self.get_logger().info('Configurado — listo para activar')
+        return TransitionCallbackReturn.SUCCESS
 
-        # ── Hilo de inferencia ────────────────────────────────────────────────
-        self.inference_thread = threading.Thread(target=self.inference_loop, daemon=True)
-        self.inference_thread.start()
+    def on_activate(self, state: State) -> TransitionCallbackReturn:
+        self.get_logger().info('Activando — cargando modelos …')
+        self._load_models()
+        if not self._csv_ready:
+            self.csv_file, self.csv_writer = self._init_csv()
+            self._csv_ready = True
+        self.get_logger().info('ACTIVO')
+        return super().on_activate(state)
 
-        self.get_logger().info('Nodo iniciado — esperando suscriptores …')
+    def on_deactivate(self, state: State) -> TransitionCallbackReturn:
+        self.get_logger().info('Desactivando …')
+        self._frame_event.clear()
+        self._unload_models()
+        self.detection_counts.clear()
+        self.get_logger().info('INACTIVO')
+        return super().on_deactivate(state)
 
-    # ── Helpers AprilTag ──────────────────────────────────────────────────────
+    def on_cleanup(self, state: State) -> TransitionCallbackReturn:
+        if self.csv_file is not None:
+            self.csv_file.close()
+        return TransitionCallbackReturn.SUCCESS
+
+    def on_shutdown(self, state: State) -> TransitionCallbackReturn:
+        if self.csv_file is not None:
+            self.csv_file.close()
+        return TransitionCallbackReturn.SUCCESS
+
+    # =========================================================================
+    # Modelos
+    # =========================================================================
+
+    def _load_models(self) -> None:
+        if self.model is None:
+            self.get_logger().info(f'Cargando YOLO: {self._model_path} …')
+            t0 = time.time()
+            self.model = YOLO(self._model_path)
+            self.get_logger().info(f'YOLO listo en {time.time()-t0:.1f}s')
+
+        if self.qr_detector is None:
+            self.get_logger().info('Cargando WeChatQRCode …')
+            t0 = time.time()
+            try:
+                self.qr_detector = cv2.wechat_qrcode_WeChatQRCode(
+                    f'{QR_MODEL_DIR}/detect.prototxt',
+                    f'{QR_MODEL_DIR}/detect.caffemodel',
+                    f'{QR_MODEL_DIR}/sr.prototxt',
+                    f'{QR_MODEL_DIR}/sr.caffemodel',
+                )
+                self.get_logger().info(f'WeChatQRCode listo en {time.time()-t0:.1f}s')
+            except Exception as e:
+                self.get_logger().warn(f'WeChat sin modelos CNN ({e})')
+                self.qr_detector = cv2.wechat_qrcode_WeChatQRCode()
+
+    def _unload_models(self) -> None:
+        self.model        = None
+        self.qr_detector  = None
+
+    def _is_active(self) -> bool:
+        return self._state_machine.current_state[1] == 'active'
+
+    # =========================================================================
+    # AprilTag
+    # =========================================================================
 
     def _build_apriltag_detectors(self) -> dict:
-        """Crea un cv2.aruco.ArucoDetector por cada diccionario AprilTag."""
         detectors = {}
         for name, dict_id in APRILTAG_DICTS.items():
             dictionary = cv2.aruco.getPredefinedDictionary(dict_id)
-            detectors[name] = cv2.aruco.ArucoDetector(dictionary, self._build_apriltag_params())
+            detectors[name] = cv2.aruco.ArucoDetector(
+                dictionary, self._build_apriltag_params()
+            )
         return detectors
 
     @staticmethod
     def _build_apriltag_params() -> cv2.aruco.DetectorParameters:
         params = cv2.aruco.DetectorParameters()
-        # Refinamiento de esquinas con el algoritmo propio de AprilTag
-        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_APRILTAG
-        params.minMarkerPerimeterRate  = 0.02
-        params.maxMarkerPerimeterRate  = 4.0
+        params.cornerRefinementMethod      = cv2.aruco.CORNER_REFINE_APRILTAG
+        params.minMarkerPerimeterRate      = 0.02
+        params.maxMarkerPerimeterRate      = 4.0
         params.polygonalApproxAccuracyRate = 0.05
-        params.minCornerDistanceRate   = 0.05
-        params.minDistanceToBorder     = 3
+        params.minCornerDistanceRate       = 0.05
+        params.minDistanceToBorder         = 3
         return params
 
-    # ── Revisión de suscriptores ──────────────────────────────────────────────
+    # =========================================================================
+    # Profundidad
+    # =========================================================================
 
-    def _check_subscribers(self) -> None:
-        has_subs = (
-            self.pub.get_subscription_count()       > 0 or
-            self.image_pub.get_subscription_count() > 0
-        )
-
-        if has_subs and not self._processing_active:
-            self._processing_active = True
-            if not self._csv_ready:
-                self.csv_file, self.csv_writer = self._init_csv()
-                self._csv_ready = True
-                self.get_logger().info('CSV creado al detectar el primer suscriptor.')
-            self.get_logger().info('Suscriptor detectado — procesamiento ACTIVO')
-
-        elif not has_subs and self._processing_active:
-            self._processing_active = False
-            self.detection_counts.clear()
-            self.get_logger().info('Sin suscriptores — procesamiento INACTIVO')
-
-    # ── Profundidad ───────────────────────────────────────────────────────────
-
-    def info_callback(self, msg: CameraInfo):
-        self.fx = msg.k[0]
-        self.fy = msg.k[4]
-        self.cx = msg.k[2]
-        self.cy = msg.k[5]
+    def _info_callback(self, msg: CameraInfo):
+        self.fx = msg.k[0];  self.fy = msg.k[4]
+        self.cx = msg.k[2];  self.cy = msg.k[5]
         self.camera_info = msg
 
-    def depth_callback(self, msg: Image):
+    def _depth_callback(self, msg: Image):
         depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
         with self.lock:
             self.depth_image = depth
@@ -222,144 +249,110 @@ class DetectorNode(Node):
         with self.lock:
             depth = self.depth_image
             info  = self.camera_info
-
         if depth is None or info is None:
             return None
-
-        h, w = depth.shape[:2]
-        u = int(np.clip(u, 5, w - 6))
-        v = int(np.clip(v, 5, h - 6))
-
-        roi   = depth[v - 5:v + 5, u - 5:u + 5]
+        h, w  = depth.shape[:2]
+        u     = int(np.clip(u, 5, w - 6))
+        v     = int(np.clip(v, 5, h - 6))
+        roi   = depth[v-5:v+5, u-5:u+5]
         valid = roi[roi > 0]
-
         if len(valid) == 0:
             return None
-
         z = np.median(valid) / 1000.0
         x = (u - self.cx) * z / self.fx
         y = (v - self.cy) * z / self.fy
         return float(x), float(y), float(z)
 
-    # ── CSV ───────────────────────────────────────────────────────────────────
+    # =========================================================================
+    # CSV
+    # =========================================================================
 
     def _read_mission_number(self) -> int:
         if not MISSION_FILE.exists():
             MISSION_FILE.write_text('1')
         return int(MISSION_FILE.read_text().strip())
 
-    def _increment_mission_number(self, current: int):
-        MISSION_FILE.write_text(str(current + 1))
-
     def _init_csv(self):
         mission_num = self._read_mission_number()
-        self._increment_mission_number(mission_num)
+        MISSION_FILE.write_text(str(mission_num + 1))
         self.current_mission_num = mission_num
-
-        now               = datetime.now()
-        start_date        = now.strftime('%Y-%m-%d')
-        start_time_file   = now.strftime('%H-%M-%S')
-        start_time_header = now.strftime('%H:%M:%S')
-
+        now             = datetime.now()
+        start_date      = now.strftime('%Y-%m-%d')
+        start_time_file = now.strftime('%H-%M-%S')
+        start_time_hdr  = now.strftime('%H:%M:%S')
         CSV_DIR.mkdir(parents=True, exist_ok=True)
-
         filename = (
             f'RoboCup{YEAR}-{TEAM_NAME}-Prelim{mission_num}'
             f'-{start_date}-{start_time_file}-pois.csv'
         )
         filepath = CSV_DIR / filename
-
         f      = open(filepath, 'w', newline='')
         writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
-
-        f.write('"pois"\n')
-        f.write('"1.3"\n')
-        f.write(f'"{TEAM_NAME}"\n')
-        f.write(f'"{COUNTRY}"\n')
-        f.write(f'"{start_date}"\n')
-        f.write(f'"{start_time_header}"\n')
-        f.write(f'"{mission_num}"\n')
-        f.write('\n')
+        f.write('"pois"\n"1.3"\n')
+        f.write(f'"{TEAM_NAME}"\n"{COUNTRY}"\n')
+        f.write(f'"{start_date}"\n"{start_time_hdr}"\n"{mission_num}"\n\n')
         f.write('detection,time,type,name,x,y,z,robot,mode\n')
         f.flush()
-
         self.get_logger().info(f'CSV creado: {filepath}')
         return f, writer
 
-    def write_csv_row(self, detection_type: str, name: str,
-                      x: float = None, y: float = None, z: float = None):
+    def _write_csv_row(self, msg: Detection):
+        """Escribe directamente desde el mensaje — sin duplicar lógica."""
         if not self._csv_ready or self.csv_writer is None:
-            self.get_logger().warn(
-                f'CSV no listo — detección ignorada en disco: {name}'
-            )
             return
-
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        x =''
+        y =''
+        z = f'{msg.z:.3f}' if msg.z != -1.0 else ''
         self.csv_writer.writerow([
-            self.detection_counter,
-            timestamp,
-            detection_type,
-            name,
-            f'{x:.3f}' if x is not None else '',
-            f'{y:.3f}' if y is not None else '',
-            f'{z:.3f}' if z is not None else '',
-            ROBOT,
-            MODE,
+            msg.detection_id,
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            msg.detection_type, msg.label,
+            x, y, z,
+            ROBOT, MODE,
         ])
         self.csv_file.flush()
 
-    # ── Detección ─────────────────────────────────────────────────────────────
+    # =========================================================================
+    # Publicación — ahora con mensaje custom
+    # =========================================================================
 
     def get_detection_type(self, name: str) -> str:
-        if name in HAZMAT_CLASSES:
-            return 'hazmat_sign'
-        elif name in REAL_OBJECT_CLASSES:
-            return 'real_object'
+        if name in HAZMAT_CLASSES:      return 'hazmat_sign'
+        if name in REAL_OBJECT_CLASSES: return 'real_object'
         return 'unknown'
 
-    def _publish_detection(self, detection_type: str, name: str,
-                           confidence: float = 0.0,
-                           x: float = None, y: float = None, z: float = None):
+    def _publish_detection(self, detection_type: str, label: str,
+                           confidence: float = 1.0,
+                           coords_3d=None,
+                           header=None):
         now  = time.time()
-        last = self._last_published_time.get(name, 0.0)
-
+        last = self._last_published_time.get(label, 0.0)
         if now - last < DETECTION_COOLDOWN:
-            remaining = DETECTION_COOLDOWN - (now - last)
-            self.get_logger().debug(
-                f'Ignorado {name} — faltan {remaining:.1f}s para cooldown'
-            )
             return
-
-        self._last_published_time[name] = now
+        self._last_published_time[label] = now
         self.detection_counter += 1
-        self.write_csv_row(detection_type, name, x, y, z)
 
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        x_str = f'{x:.3f}' if x is not None else ' '
-        y_str = f'{y:.3f}' if y is not None else ' '
-        z_str = f'{z:.3f}' if z is not None else ' '
+        # ── Construir mensaje ─────────────────────────────────────────────────
+        msg                = Detection()
+        msg.detection_type = detection_type
+        msg.label          = label
+        msg.detection_id   = self.detection_counter
+        msg.z              = float(coords_3d[2]) if coords_3d else -1.0
 
-        if self.pub.get_subscription_count() > 0:
-            out      = String()
-            out.data = (
-                f'{self.detection_counter},'
-                f'{timestamp},'
-                f'{detection_type},'
-                f'"{name}",'
-                f'{x_str},{y_str},{z_str},'
-                f'{ROBOT},'
-                f'{MODE}'
-            )
-            self.pub.publish(out)
-            self.get_logger().info(f'Publicado: {out.data}')
-        else:
-            self.get_logger().debug(
-                f'Detección registrada en CSV pero sin suscriptores: {name}'
-            )
+        # ── Publicar y guardar ────────────────────────────────────────────────
+        self._pub_detection.publish(msg)
+        self._write_csv_row(msg)
 
-    # ── Pipeline QR ───────────────────────────────────────────────────────────
+        dist = f'{msg.z:.2f}m' if msg.z != -1.0 else 'sin profundidad'
+        self.get_logger().info(
+            f'[{detection_type}] {label} | dist={dist} | conf={confidence:.2f}'
+        )
 
-    def _validate_qr(self, value: str, pts: np.ndarray, frame_shape: tuple) -> bool:
+    # =========================================================================
+    # Pipeline QR (sin cambios en lógica, solo se actualiza la llamada)
+    # =========================================================================
+
+    def _validate_qr(self, value, pts, frame_shape):
         if not value or not value.strip():
             return False
         pts_i       = np.int32(pts).reshape(-1, 2)
@@ -374,265 +367,170 @@ class DetectorNode(Node):
             return False
         return True
 
-    def _process_qr(self, frame: np.ndarray, scale_x: float, scale_y: float) -> tuple:
-        t0  = time.time()
-        now = t0
+    def _process_qr(self, frame, scale_x, scale_y):
+        if self.qr_detector is None:
+            return frame, None, None
+        now = time.time()
         age = now - self._qr_last_seen
-
         if age < QR_HOLD_SECS and (now - self._last_qr_time) < QR_MIN_PERIOD:
             self._draw_qr_overlay(frame, age, scale_x, scale_y)
             return frame, None, None
-
         self._last_qr_time = now
-
-        h, w      = frame.shape[:2]
-        wechat_w  = QR_DETECT_WIDTH
-        wc_scale  = wechat_w / w
-
-        if wc_scale < 1.0:
-            small_qr = cv2.resize(frame, (wechat_w, int(h * wc_scale)),
-                                  interpolation=cv2.INTER_AREA)
-        else:
-            small_qr = frame
-
+        h, w     = frame.shape[:2]
+        wc_scale = QR_DETECT_WIDTH / w
+        small_qr = cv2.resize(frame, (QR_DETECT_WIDTH, int(h * wc_scale)),
+                              interpolation=cv2.INTER_AREA) if wc_scale < 1.0 else frame
         try:
             texts, points = self.qr_detector.detectAndDecode(small_qr)
         except cv2.error as e:
-            self.get_logger().warn(f'WeChat detectAndDecode error: {e}')
+            self.get_logger().warn(f'WeChat error: {e}')
             texts, points = [], []
-
         value, pts_ann = '', None
         for text, pt in zip(texts, points):
             if not text:
                 continue
             pts_in_frame = pt / wc_scale
             if self._validate_qr(text, pts_in_frame, frame.shape):
-                value   = text
-                pts_ann = pts_in_frame
+                value, pts_ann = text, pts_in_frame
                 break
-
-        new_detection = None
-        qr_coords     = None
-
+        new_detection = qr_coords = None
         if pts_ann is not None:
             self._qr_last_value = value
             self._qr_last_pts   = pts_ann
             self._qr_last_seen  = now
-
             if value not in self._qr_published:
                 self._qr_published.add(value)
                 new_detection = value
-
-                pts_i      = np.int32(pts_ann).reshape(-1, 2)
-                qr_cx_ann  = int(pts_i[:, 0].mean())
-                qr_cy_ann  = int(pts_i[:, 1].mean())
-                qr_cx_orig = int(qr_cx_ann * scale_x)
-                qr_cy_orig = int(qr_cy_ann * scale_y)
-                qr_coords  = self.pixel_to_3d(qr_cx_orig, qr_cy_orig)
-
-        age = now - self._qr_last_seen
-        self._draw_qr_overlay(frame, age, scale_x, scale_y)
+                pts_i     = np.int32(pts_ann).reshape(-1, 2)
+                qr_coords = self.pixel_to_3d(
+                    int(pts_i[:, 0].mean() * scale_x),
+                    int(pts_i[:, 1].mean() * scale_y)
+                )
+        self._draw_qr_overlay(frame, now - self._qr_last_seen, scale_x, scale_y)
         return frame, new_detection, qr_coords
 
-    def _draw_qr_overlay(self, frame: np.ndarray, age: float,
-                         scale_x: float, scale_y: float) -> None:
+    def _draw_qr_overlay(self, frame, age, scale_x, scale_y):
         if age >= QR_HOLD_SECS or self._qr_last_pts is None:
             return
-
         pts_i        = np.int32(self._qr_last_pts).reshape(-1, 2)
         x, y, bw, bh = cv2.boundingRect(pts_i)
-
         overlay = frame.copy()
-        cv2.rectangle(overlay, (x, y), (x + bw, y + bh), (0, 255, 0), -1)
+        cv2.rectangle(overlay, (x, y), (x+bw, y+bh), (0, 255, 0), -1)
         cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
-
-        cv2.rectangle(frame, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
+        cv2.rectangle(frame, (x, y), (x+bw, y+bh), (0, 255, 0), 2)
         label = self._qr_last_value[:40] + ('…' if len(self._qr_last_value) > 40 else '')
-        cv2.putText(frame, label, (x, max(y - 22, 20)),
+        cv2.putText(frame, label, (x, max(y-22, 20)),
                     cv2.FONT_HERSHEY_TRIPLEX, 0.65, (255, 255, 255), 2)
+        cx_a, cy_a = x + bw//2, y + bh//2
+        rt = self.pixel_to_3d(int(cx_a * scale_x), int(cy_a * scale_y))
+        cv2.circle(frame, (cx_a, cy_a), 6, (0, 0, 255), -1)
+        cv2.putText(frame, f'{rt[2]:.2f}m' if rt else '--',
+                    (cx_a+8, cy_a), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-        qr_cx_ann  = x + bw // 2
-        qr_cy_ann  = y + bh // 2
-        qr_cx_orig = int(qr_cx_ann * scale_x)
-        qr_cy_orig = int(qr_cy_ann * scale_y)
-        rt_coords  = self.pixel_to_3d(qr_cx_orig, qr_cy_orig)
+    # =========================================================================
+    # Pipeline AprilTag
+    # =========================================================================
 
-        cv2.circle(frame, (qr_cx_ann, qr_cy_ann), 6, (0, 0, 255), -1)
-        dist_text = f'{rt_coords[2]:.2f}m' if rt_coords is not None else '--'
-        cv2.putText(frame, dist_text,
-                    (qr_cx_ann + 8, qr_cy_ann),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-    # ── Pipeline AprilTag ─────────────────────────────────────────────────────
-
-    def _process_apriltag(self, frame: np.ndarray, scale_x: float, scale_y: float) -> tuple:
-        """
-        Detecta AprilTags en `frame` (resolución anotada 640×360).
-        Retorna el frame anotado y una lista de nuevas detecciones:
-            [(tag_key, tag_label, coords_3d), ...]
-        Respeta:
-          - AT_MIN_PERIOD  : intervalo mínimo entre llamadas al detector
-          - AT_HOLD_SECS   : mantiene el overlay aunque el tag ya no se vea
-          - DETECTION_COOLDOWN: heredado de _publish_detection
-        """
+    def _process_apriltag(self, frame, scale_x, scale_y):
         now = time.time()
-
-        # ── Frecuencia de detección ───────────────────────────────────────────
         if now - self._at_last_time < AT_MIN_PERIOD:
-            # Solo dibujar el overlay de la última detección conocida
             self._draw_apriltag_overlays(frame, now, scale_x, scale_y)
             return frame, []
-
         self._at_last_time = now
-
-        # ── Preparar imagen de detección ──────────────────────────────────────
         h, w     = frame.shape[:2]
         at_scale = AT_DETECT_WIDTH / w
-        if at_scale < 1.0:
-            small_at = cv2.resize(frame, (AT_DETECT_WIDTH, int(h * at_scale)),
-                                  interpolation=cv2.INTER_AREA)
-        else:
-            small_at = frame
+        small_at = cv2.resize(frame, (AT_DETECT_WIDTH, int(h * at_scale)),
+                              interpolation=cv2.INTER_AREA) if at_scale < 1.0 else frame
+        if at_scale >= 1.0:
             at_scale = 1.0
-
         gray = cv2.cvtColor(small_at, cv2.COLOR_BGR2GRAY)
-
-        # ── Detección en todos los diccionarios ───────────────────────────────
         new_detections = []
-        detected_keys  = set()
-
         for dict_name, detector in self._at_detectors.items():
             try:
                 corners_list, ids, _ = detector.detectMarkers(gray)
             except cv2.error as e:
-                self.get_logger().warn(f'AprilTag detect error ({dict_name}): {e}')
+                self.get_logger().warn(f'AprilTag error ({dict_name}): {e}')
                 continue
-
             if ids is None:
                 continue
-
             for corners, tag_id in zip(corners_list, ids.flatten()):
-                # Escalar esquinas de vuelta a resolución anotada
-                corners_frame = corners[0] / at_scale      # shape (4, 2)
-
-                # ── Validar por área ──────────────────────────────────────────
+                corners_frame = corners[0] / at_scale
                 x_c, y_c, bw, bh = cv2.boundingRect(np.int32(corners_frame))
-                area = bw * bh
-                if area < AT_MIN_AREA:
+                if bw * bh < AT_MIN_AREA:
                     continue
-
-                tag_key   = f'{dict_name}:{tag_id}'   # clave interna (cooldown/dedup)
-                tag_label = str(int(tag_id))            # solo el número → va al CSV y topic
-                detected_keys.add(tag_key)
-
-                # Centro en frame anotado → pixel original
-                cx_ann  = int(corners_frame[:, 0].mean())
-                cy_ann  = int(corners_frame[:, 1].mean())
-                cx_orig = int(cx_ann * scale_x)
-                cy_orig = int(cy_ann * scale_y)
-
-                coords_3d = self.pixel_to_3d(cx_orig, cy_orig)
-
-                # ── Actualizar overlay ────────────────────────────────────────
+                tag_key   = f'{dict_name}:{tag_id}'
+                tag_label = str(int(tag_id))
+                cx_ann    = int(corners_frame[:, 0].mean())
+                cy_ann    = int(corners_frame[:, 1].mean())
+                coords_3d = self.pixel_to_3d(int(cx_ann*scale_x), int(cy_ann*scale_y))
                 self._at_last_detections[tag_key] = {
-                    'corners':   corners_frame,
-                    'center':    (cx_ann, cy_ann),
-                    'seen_time': now,
-                    'coords':    coords_3d,
-                    'label':     tag_label,
+                    'corners': corners_frame, 'center': (cx_ann, cy_ann),
+                    'seen_time': now, 'coords': coords_3d, 'label': tag_label,
                 }
-
-                # ── Nueva detección (para publicar) ───────────────────────────
                 if tag_key not in self._at_published:
                     self._at_published.add(tag_key)
                     new_detections.append((tag_key, tag_label, coords_3d))
-                    self.get_logger().info(
-                        f'AprilTag detectado: {tag_label}  '
-                        f'dist={coords_3d[2]:.2f}m' if coords_3d else
-                        f'AprilTag detectado: {tag_label}  dist=--'
-                    )
-
-        # Limpiar de _at_last_detections los tags que llevan mucho sin verse
         for key in list(self._at_last_detections.keys()):
             if now - self._at_last_detections[key]['seen_time'] > AT_HOLD_SECS * 10:
                 del self._at_last_detections[key]
-
-        # ── Dibujar overlays ──────────────────────────────────────────────────
         self._draw_apriltag_overlays(frame, now, scale_x, scale_y)
-
         return frame, new_detections
 
-    def _draw_apriltag_overlays(self, frame: np.ndarray, now: float,
-                                scale_x: float, scale_y: float) -> None:
-        """Dibuja el overlay de todos los AprilTags visibles recientemente."""
+    def _draw_apriltag_overlays(self, frame, now, scale_x, scale_y):
         for tag_key, info in self._at_last_detections.items():
-            age = now - info['seen_time']
-            if age > AT_HOLD_SECS:
+            if now - info['seen_time'] > AT_HOLD_SECS:
                 continue
-
             corners = np.int32(info['corners'])
             cx, cy  = info['center']
-            label   = info['label']
-            coords  = info['coords']
-
-            # ── Relleno semitransparente ──────────────────────────────────────
             overlay = frame.copy()
             cv2.fillPoly(overlay, [corners], (255, 128, 0))
             cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
-
-            # ── Contorno del marcador ─────────────────────────────────────────
-            cv2.polylines(frame, [corners], isClosed=True, color=(255, 128, 0), thickness=2)
-
-            # ── Ejes de las esquinas ──────────────────────────────────────────
-            for i, pt in enumerate(corners):
+            cv2.polylines(frame, [corners], True, (255, 128, 0), 2)
+            for pt in corners:
                 cv2.circle(frame, tuple(pt), 4, (0, 128, 255), -1)
-
-            # ── Punto central ─────────────────────────────────────────────────
             cv2.circle(frame, (cx, cy), 6, (0, 0, 255), -1)
-
-            # ── Etiqueta: solo el ID numérico ─────────────────────────────────
             x_b, y_b, bw, bh = cv2.boundingRect(corners)
-            cv2.putText(frame, f'AprilTag {label}',
-                        (x_b, max(y_b - 22, 20)),
+            cv2.putText(frame, f'AprilTag {info["label"]}',
+                        (x_b, max(y_b-22, 20)),
                         cv2.FONT_HERSHEY_TRIPLEX, 0.55, (255, 255, 255), 2)
+            rt = self.pixel_to_3d(int(cx*scale_x), int(cy*scale_y))
+            cv2.putText(frame, f'{rt[2]:.2f}m' if rt else '--',
+                        (cx+8, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-            # ── Distancia ─────────────────────────────────────────────────────
-            # Obtener distancia en tiempo real (no solo la del momento de detección)
-            cx_orig = int(cx * scale_x)
-            cy_orig = int(cy * scale_y)
-            rt_coords = self.pixel_to_3d(cx_orig, cy_orig)
+    # =========================================================================
+    # Callbacks de imagen
+    # =========================================================================
 
-            dist_text = f'{rt_coords[2]:.2f}m' if rt_coords is not None else '--'
-            cv2.putText(frame, dist_text,
-                        (cx + 8, cy),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-    # ── Callbacks ─────────────────────────────────────────────────────────────
-
-    def image_callback(self, msg: Image):
+    def _image_callback(self, msg: Image):
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-
         with self.lock:
             self.latest_frame  = frame
             self.latest_header = msg.header
             annotated          = self.last_annotated
+        self._frame_event.set()
+        if self._is_active() and self._pub_annotated.get_subscription_count() > 0:
+            out            = annotated if annotated is not None else frame
+            out_msg        = self.bridge.cv2_to_imgmsg(out, encoding='bgr8')
+            out_msg.header = msg.header
+            self._pub_annotated.publish(out_msg)
 
-        if self.image_pub.get_subscription_count() > 0:
-            annotated_msg        = self.bridge.cv2_to_imgmsg(
-                annotated if annotated is not None else frame, encoding='bgr8')
-            annotated_msg.header = msg.header
-            self.image_pub.publish(annotated_msg)
+    # =========================================================================
+    # Hilo de inferencia
+    # =========================================================================
 
-    # ── Hilo de inferencia ────────────────────────────────────────────────────
-
-    def inference_loop(self):
+    def _inference_loop(self):
         while rclpy.ok():
-            if not self._processing_active:
-                time.sleep(0.1)
+            got = self._frame_event.wait(timeout=0.5)
+            if not got:
+                continue
+            self._frame_event.clear()
+
+            if not self._is_active() or self.model is None:
                 continue
 
             with self.lock:
-                frame = self.latest_frame
+                frame  = self.latest_frame
+                header = self.latest_header
 
             if frame is None:
                 continue
@@ -641,9 +539,11 @@ class DetectorNode(Node):
             scale_x = orig_w / 640.0
             scale_y = orig_h / 360.0
 
-            small       = cv2.resize(frame, (640, 360))
-            results     = self.model(small, conf=self.confidence_threshold, imgsz=320, verbose=False)[0]
-            annotated   = results.plot()
+            small   = cv2.resize(frame, (640, 360))
+            results = self.model(
+                small, conf=self.confidence_threshold, imgsz=320, verbose=False
+            )[0]
+            annotated = results.plot()
 
             detected_this_frame = set()
 
@@ -655,31 +555,23 @@ class DetectorNode(Node):
                 detected_this_frame.add(name)
 
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                cx_ann  = int((x1 + x2) / 2)
-                cy_ann  = int((y1 + y2) / 2)
-                cx_orig = int(cx_ann * scale_x)
-                cy_orig = int(cy_ann * scale_y)
-
-                coords_3d = self.pixel_to_3d(cx_orig, cy_orig)
-                dist_m    = coords_3d[2] if coords_3d is not None else None
+                cx_ann    = int((x1+x2)/2)
+                cy_ann    = int((y1+y2)/2)
+                coords_3d = self.pixel_to_3d(int(cx_ann*scale_x), int(cy_ann*scale_y))
 
                 cv2.circle(annotated, (cx_ann, cy_ann), 6, (0, 0, 255), -1)
                 cv2.putText(annotated,
-                            f'{dist_m:.2f}m' if dist_m is not None else '--',
-                            (cx_ann + 8, cy_ann),
+                            f'{coords_3d[2]:.2f}m' if coords_3d else '--',
+                            (cx_ann+8, cy_ann),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
                 self.detection_counts[name] = self.detection_counts.get(name, 0) + 1
-                count = self.detection_counts[name]
-
-                if count >= self.min_confirmations:
-                    detection_type = self.get_detection_type(name)
-                    z3d = coords_3d[2] if coords_3d else None
-
-                    if detection_type != 'unknown':
+                if self.detection_counts[name] >= self.min_confirmations:
+                    det_type = self.get_detection_type(name)
+                    if det_type != 'unknown':
                         self._publish_detection(
-                            detection_type, name, confidence,
-                            x=0, y=0, z=z3d)
+                            det_type, name, confidence, coords_3d, header
+                        )
                     else:
                         self.get_logger().warn(f'Clase sin mapear: {name}')
                     self.detection_counts[name] = 0
@@ -690,18 +582,13 @@ class DetectorNode(Node):
 
             # ── QR ────────────────────────────────────────────────────────────
             annotated, qr_value, qr_coords = self._process_qr(annotated, scale_x, scale_y)
-
             if qr_value:
-                z3d = qr_coords[2] if qr_coords else None
-                self._publish_detection('ar_code', qr_value, x=0, y=0, z=z3d)
-                self.get_logger().info(f'QR detectado: {qr_value}')
+                self._publish_detection('ar_code', qr_value, 1.0, qr_coords, header)
 
             # ── AprilTag ──────────────────────────────────────────────────────
             annotated, at_detections = self._process_apriltag(annotated, scale_x, scale_y)
-
-            for tag_key, tag_label, at_coords in at_detections:
-                z3d = at_coords[2] if at_coords else None
-                self._publish_detection('ar_code', tag_label, x=0, y=0, z=z3d)
+            for _, tag_label, at_coords in at_detections:
+                self._publish_detection('ar_code', tag_label, 1.0, at_coords, header)
 
             with self.lock:
                 self.last_annotated = annotated
