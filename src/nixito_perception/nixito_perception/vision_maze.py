@@ -13,6 +13,7 @@ import csv
 import cv2
 import numpy as np
 import time
+import math                                    # <── NUEVO: para atan2/degrees
 
 
 # ── Clases ────────────────────────────────────────────────────────────────────
@@ -232,7 +233,7 @@ class DetectorNode(LifecycleNode):
         return params
 
     # =========================================================================
-    # Profundidad
+    # Profundidad e intrínsecos
     # =========================================================================
 
     def _info_callback(self, msg: CameraInfo):
@@ -262,6 +263,20 @@ class DetectorNode(LifecycleNode):
         x = (u - self.cx) * z / self.fx
         y = (v - self.cy) * z / self.fy
         return float(x), float(y), float(z)
+
+    def pixel_to_yaw(self, u: int) -> float:
+        """
+        Ángulo horizontal (yaw) en grados desde el centro óptico de la cámara.
+        Usa los intrínsecos reales de la RealSense (cx, fx) para máxima precisión.
+
+        Retorna:
+            yaw_deg > 0  →  objeto a la DERECHA del centro óptico
+            yaw_deg < 0  →  objeto a la IZQUIERDA del centro óptico
+            0.0          →  si los intrínsecos aún no están disponibles
+        """
+        if self.fx is None or self.cx is None:
+            return 0.0
+        return math.degrees(math.atan2(u - self.cx, self.fx))
 
     # =========================================================================
     # CSV
@@ -313,7 +328,7 @@ class DetectorNode(LifecycleNode):
         self.csv_file.flush()
 
     # =========================================================================
-    # Publicación — ahora con mensaje custom
+    # Publicación
     # =========================================================================
 
     def get_detection_type(self, name: str) -> str:
@@ -324,6 +339,7 @@ class DetectorNode(LifecycleNode):
     def _publish_detection(self, detection_type: str, label: str,
                            confidence: float = 1.0,
                            coords_3d=None,
+                           yaw_deg: float = 0.0,
                            header=None):
         now  = time.time()
         last = self._last_published_time.get(label, 0.0)
@@ -338,6 +354,7 @@ class DetectorNode(LifecycleNode):
         msg.label          = label
         msg.detection_id   = self.detection_counter
         msg.z              = float(coords_3d[2]) if coords_3d else -1.0
+        msg.yaw            = float(yaw_deg)
 
         # ── Publicar y guardar ────────────────────────────────────────────────
         self._pub_detection.publish(msg)
@@ -345,11 +362,11 @@ class DetectorNode(LifecycleNode):
 
         dist = f'{msg.z:.2f}m' if msg.z != -1.0 else 'sin profundidad'
         self.get_logger().info(
-            f'[{detection_type}] {label} | dist={dist} | conf={confidence:.2f}'
+            f'[{detection_type}] {label} | dist={dist} | yaw={yaw_deg:+.1f}° | conf={confidence:.2f}'
         )
 
     # =========================================================================
-    # Pipeline QR (sin cambios en lógica, solo se actualiza la llamada)
+    # Pipeline QR
     # =========================================================================
 
     def _validate_qr(self, value, pts, frame_shape):
@@ -369,12 +386,12 @@ class DetectorNode(LifecycleNode):
 
     def _process_qr(self, frame, scale_x, scale_y):
         if self.qr_detector is None:
-            return frame, None, None
+            return frame, None, None, 0.0
         now = time.time()
         age = now - self._qr_last_seen
         if age < QR_HOLD_SECS and (now - self._last_qr_time) < QR_MIN_PERIOD:
             self._draw_qr_overlay(frame, age, scale_x, scale_y)
-            return frame, None, None
+            return frame, None, None, 0.0
         self._last_qr_time = now
         h, w     = frame.shape[:2]
         wc_scale = QR_DETECT_WIDTH / w
@@ -394,6 +411,7 @@ class DetectorNode(LifecycleNode):
                 value, pts_ann = text, pts_in_frame
                 break
         new_detection = qr_coords = None
+        qr_yaw = 0.0                                          # <── inicializar
         if pts_ann is not None:
             self._qr_last_value = value
             self._qr_last_pts   = pts_ann
@@ -401,13 +419,13 @@ class DetectorNode(LifecycleNode):
             if value not in self._qr_published:
                 self._qr_published.add(value)
                 new_detection = value
-                pts_i     = np.int32(pts_ann).reshape(-1, 2)
-                qr_coords = self.pixel_to_3d(
-                    int(pts_i[:, 0].mean() * scale_x),
-                    int(pts_i[:, 1].mean() * scale_y)
-                )
+                pts_i  = np.int32(pts_ann).reshape(-1, 2)
+                cx_qr  = int(pts_i[:, 0].mean() * scale_x)   # <── centro en espacio original
+                cy_qr  = int(pts_i[:, 1].mean() * scale_y)
+                qr_coords = self.pixel_to_3d(cx_qr, cy_qr)
+                qr_yaw    = self.pixel_to_yaw(cx_qr)          # <── NUEVO
         self._draw_qr_overlay(frame, now - self._qr_last_seen, scale_x, scale_y)
-        return frame, new_detection, qr_coords
+        return frame, new_detection, qr_coords, qr_yaw        # <── retorna 4 valores
 
     def _draw_qr_overlay(self, frame, age, scale_x, scale_y):
         if age >= QR_HOLD_SECS or self._qr_last_pts is None:
@@ -469,7 +487,8 @@ class DetectorNode(LifecycleNode):
                 }
                 if tag_key not in self._at_published:
                     self._at_published.add(tag_key)
-                    new_detections.append((tag_key, tag_label, coords_3d))
+                    at_yaw = self.pixel_to_yaw(int(cx_ann * scale_x))   # <── NUEVO
+                    new_detections.append((tag_key, tag_label, coords_3d, at_yaw))  # <── 4 valores
         for key in list(self._at_last_detections.keys()):
             if now - self._at_last_detections[key]['seen_time'] > AT_HOLD_SECS * 10:
                 del self._at_last_detections[key]
@@ -557,11 +576,15 @@ class DetectorNode(LifecycleNode):
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                 cx_ann    = int((x1+x2)/2)
                 cy_ann    = int((y1+y2)/2)
-                coords_3d = self.pixel_to_3d(int(cx_ann*scale_x), int(cy_ann*scale_y))
 
+                coords_3d = self.pixel_to_3d(int(cx_ann*scale_x), int(cy_ann*scale_y))
+                yaw = self.pixel_to_yaw(int(cx_ann * scale_x))
+
+                # ── Visualización ─────────────────────────────────────────────
                 cv2.circle(annotated, (cx_ann, cy_ann), 6, (0, 0, 255), -1)
-                cv2.putText(annotated,
-                            f'{coords_3d[2]:.2f}m' if coords_3d else '--',
+
+                dist_text = f'{coords_3d[2]:.2f}m' if coords_3d else '--'
+                cv2.putText(annotated, dist_text,
                             (cx_ann+8, cy_ann),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
@@ -570,7 +593,9 @@ class DetectorNode(LifecycleNode):
                     det_type = self.get_detection_type(name)
                     if det_type != 'unknown':
                         self._publish_detection(
-                            det_type, name, confidence, coords_3d, header
+                            det_type, name, confidence, coords_3d,
+                            yaw_deg=yaw,
+                            header=header
                         )
                     else:
                         self.get_logger().warn(f'Clase sin mapear: {name}')
@@ -581,14 +606,24 @@ class DetectorNode(LifecycleNode):
                     self.detection_counts[name] = 0
 
             # ── QR ────────────────────────────────────────────────────────────
-            annotated, qr_value, qr_coords = self._process_qr(annotated, scale_x, scale_y)
+            annotated, qr_value, qr_coords, qr_yaw = self._process_qr(   # <── desempacar 4
+                annotated, scale_x, scale_y
+            )
             if qr_value:
-                self._publish_detection('ar_code', qr_value, 1.0, qr_coords, header)
+                self._publish_detection(
+                    'ar_code', qr_value, 1.0, qr_coords,
+                    yaw_deg=qr_yaw,                                        # <── NUEVO
+                    header=header,
+                )
 
             # ── AprilTag ──────────────────────────────────────────────────────
             annotated, at_detections = self._process_apriltag(annotated, scale_x, scale_y)
-            for _, tag_label, at_coords in at_detections:
-                self._publish_detection('ar_code', tag_label, 1.0, at_coords, header)
+            for _, tag_label, at_coords, at_yaw in at_detections:         # <── desempacar 4
+                self._publish_detection(
+                    'ar_code', tag_label, 1.0, at_coords,
+                    yaw_deg=at_yaw,                                        # <── NUEVO
+                    header=header,
+                )
 
             with self.lock:
                 self.last_annotated = annotated
