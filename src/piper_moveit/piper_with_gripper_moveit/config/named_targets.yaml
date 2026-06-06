@@ -1,0 +1,114 @@
+# Named targets for Piper with gripper.
+# Publish the target name on /piper/named_target to execute it.
+
+targets:
+  zero:
+    type: joint
+    group: arm
+    joints:
+      joint1: 0.0
+      joint2: 0.0
+      joint3: 0.0
+      joint4: 0.0
+      joint5: 0.0
+      joint6: 0.0
+
+  home:
+    type: joint
+    group: arm
+    joints:
+      joint1: 0.0
+      joint2: 0.8
+      joint3: -1.4
+      joint4: 0.0
+      joint5: 0.6
+      joint6: 0.0
+
+  escape:
+    type: joint
+    group: arm
+    joints:
+      joint1: 0.0
+      joint2: 0.35
+      joint3: -0.45
+      joint4: 0.0
+      joint5: 0.25
+      joint6: 0.0
+
+  stow:
+    type: joint
+    group: arm
+    joints:
+      joint1: 0.0
+      joint2: 1.2
+      joint3: -2.1
+      joint4: 0.0
+      joint5: 0.9
+      joint6: 0.0
+
+  observe_front:
+    type: joint
+    group: arm
+    joints:
+      joint1: 0.0
+      joint2: 0.9
+      joint3: -1.6
+      joint4: 0.0
+      joint5: 0.7
+      joint6: 0.0
+
+  observe_left:
+    type: joint
+    group: arm
+    joints:
+      joint1: 0.6
+      joint2: 0.9
+      joint3: -1.5
+      joint4: 0.2
+      joint5: 0.7
+      joint6: 0.3
+
+  observe_right:
+    type: joint
+    group: arm
+    joints:
+      joint1: -0.6
+      joint2: 0.9
+      joint3: -1.5
+      joint4: -0.2
+      joint5: 0.7
+      joint6: -0.3
+
+  pregrasp:
+    type: joint
+    group: arm
+    joints:
+      joint1: 0.0
+      joint2: 1.1
+      joint3: -1.8
+      joint4: 0.0
+      joint5: 0.9
+      joint6: 0.0
+
+  open:
+    type: joint
+    group: gripper
+    joints:
+      joint7: 0.035
+
+  close:
+    type: joint
+    group: gripper
+    joints:
+      joint7: 0.0
+
+# Cartesian target template. Uncomment and tune with verified safe values.
+#  pick_ready:
+#    type: cartesian
+#    group: arm
+#    frame_id: base_link
+#    link_name: gripper_base
+#    position: {x: 0.35, y: 0.0, z: 0.25}
+#    rpy: {roll: 0.0, pitch: 0.0, yaw: 0.0}
+#    position_tolerance: 0.01
+#    orientation_tolerance: 0.05

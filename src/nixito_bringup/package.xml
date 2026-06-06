@@ -15,9 +15,18 @@
   <depend>orion_arm</depend>
   <depend>orion_gui</depend>
   <depend>nixito_description</depend>
+  <depend>piper_hardware_bridge</depend>
+  <depend>piper_description</depend>
+  <depend>piper_with_gripper_moveit</depend>
+  <depend>xacro</depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>moveit_configs_utils</exec_depend>
+  <exec_depend>moveit_ros_move_group</exec_depend>
   
 
   <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>joint_state_publisher_gui</exec_depend>
   <exec_depend>rviz2</exec_depend>
 
 

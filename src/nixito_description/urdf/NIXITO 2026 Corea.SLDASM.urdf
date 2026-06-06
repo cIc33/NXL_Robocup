@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.1-13-g25da24a-dirty  Build Version: 1.6.9639.2506
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="NIXITO 2026.SLDASM">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="-0.184395945779519 0.431946712720634 0.149004118152158"
+        rpy="0 0 0" />
+      <mass
+        value="24.0361753537654" />
+      <inertia
+        ixx="0.0692970504509231"
+        ixy="-2.1597549524525E-05"
+        ixz="-0.00108618565053537"
+        iyy="0.274580046029045"
+        iyz="5.23944662916574E-05"
+        izz="0.277217039635956" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://NIXITO 2026.SLDASM/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://NIXITO 2026.SLDASM/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="flipper_R_link">
+    <inertial>
+      <origin
+        xyz="0.10014 1.019E-05 -0.004882"
+        rpy="0 0 0" />
+      <mass
+        value="0.87584" />
+      <inertia
+        ixx="0.0009623"
+        ixy="-1.7655E-09"
+        ixz="-7.6272E-06"
+        iyy="0.0085169"
+        iyz="8.609E-07"
+        izz="0.0085709" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://NIXITO 2026.SLDASM/meshes/flipper_R_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://NIXITO 2026.SLDASM/meshes/flipper_R_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="flipper_R_joint"
+    type="continuous">
+    <origin
+      xyz="0.11467 0.16639 0.10463"
+      rpy="-1.5708 -0.015767 3.1416" />
+    <parent
+      link="base_link" />
+    <child
+      link="flipper_R_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      effort="100"
+      velocity="100" />
+    <dynamics
+      friction="0.1" />
+  </joint>
+  <link
+    name="flipper_L_link">
+    <inertial>
+      <origin
+        xyz="-0.10014 -0.0015792 0.0047759"
+        rpy="0 0 0" />
+      <mass
+        value="0.87584" />
+      <inertia
+        ixx="0.0009642"
+        ixy="-0.00011909"
+        ixz="-8.4202E-06"
+        iyy="0.008515"
+        iyz="-1.4175E-07"
+        izz="0.0085709" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://NIXITO 2026.SLDASM/meshes/flipper_L_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://NIXITO 2026.SLDASM/meshes/flipper_L_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="flipper_L_joint"
+    type="continuous">
+    <origin
+      xyz="0.11467 0.68797 0.10463"
+      rpy="-1.5708 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="flipper_L_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      effort="100"
+      velocity="100" />
+    <dynamics
+      friction="0.1" />
+  </joint>
+  <link
+    name="dir_R_link">
+    <inertial>
+      <origin
+        xyz="-5.8013878025398E-06 9.29245505210119E-07 0.0305867376338103"
+        rpy="0 0 0" />
+      <mass
+        value="1.3754826889591" />
+      <inertia
+        ixx="0.00316961596584357"
+        ixy="-9.14070031604185E-09"
+        ixz="-7.32360840596535E-07"
+        iyy="0.00316956036222584"
+        iyz="1.17306916419896E-07"
+        izz="0.00491633292421438" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://NIXITO 2026.SLDASM/meshes/dir_R_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://NIXITO 2026.SLDASM/meshes/dir_R_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="dir_R_joint"
+    type="continuous">
+    <origin
+      xyz="-0.44833 0.27294 0.10463"
+      rpy="1.5708 0.12355 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="dir_R_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      effort="100"
+      velocity="100" />
+    <dynamics
+      friction="0.1" />
+  </joint>
+  <link
+    name="dir_L_link">
+    <inertial>
+      <origin
+        xyz="4.8611E-06 -3.2999E-06 0.024587"
+        rpy="0 0 0" />
+      <mass
+        value="1.3755" />
+      <inertia
+        ixx="0.0031696"
+        ixy="-2.7199E-08"
+        ixz="6.1366E-07"
+        iyy="0.0031696"
+        iyz="-4.1657E-07"
+        izz="0.0049163" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://NIXITO 2026.SLDASM/meshes/dir_L_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 0.50196 0.50196 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://NIXITO 2026.SLDASM/meshes/dir_L_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="dir_L_joint"
+    type="continuous">
+    <origin
+      xyz="-0.44833 0.59694 0.10463"
+      rpy="-1.5708 0.042578 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="dir_L_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      effort="100"
+      velocity="100" />
+    <dynamics
+      friction="0.1" />
+  </joint>
+</robot>

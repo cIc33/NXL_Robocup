@@ -3,6 +3,10 @@ import os
 from glob import glob
 
 package_name = 'nixito_description'
+mesh_files = [
+    path for path in glob(os.path.join('meshes', '**', '*'), recursive=True)
+    if os.path.isfile(path)
+]
 
 setup(
     name=package_name,
@@ -17,7 +21,10 @@ setup(
          glob(os.path.join('urdf', '*'))),
         # Incluir Meshes
         (os.path.join('share', package_name, 'meshes'), 
-         glob(os.path.join('meshes', '*'))),
+         mesh_files),
+        # Incluir configuraciones de RViz
+        (os.path.join('share', package_name, 'rviz'),
+         glob(os.path.join('rviz', '*'))),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
