@@ -22,7 +22,7 @@ class TC001ThermalNode(Node):
         self.bridge = CvBridge()
 
         # Captura del dispositivo
-        self.cap = cv2.VideoCapture('/dev/video2', cv2.CAP_V4L)
+        self.cap = cv2.VideoCapture('/dev/video8', cv2.CAP_V4L)
         self.cap.set(cv2.CAP_PROP_CONVERT_RGB, 0.0)
 
         if not self.cap.isOpened():

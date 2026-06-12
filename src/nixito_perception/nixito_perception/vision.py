@@ -97,9 +97,6 @@ class VisionNode(LifecycleNode):
 
     def on_configure(self, state: State) -> TransitionCallbackReturn:
         self.get_logger().info("Configurando nodo …")
-        for mode, (topic, qos) in TOPIC_OUTPUTS.items():
-            self.pubs[mode] = self.create_lifecycle_publisher(Image, topic, qos)
-            self.get_logger().info(f"  Publicador listo: {topic}")
         self.sub_rgb = self.create_subscription(
             Image, TOPIC_INPUT_RGB, self._main_loop, 1
         )
@@ -109,12 +106,20 @@ class VisionNode(LifecycleNode):
         return TransitionCallbackReturn.SUCCESS
 
     def on_activate(self, state: State) -> TransitionCallbackReturn:
+        self.get_logger().info("Activando — creando publicadores …")
+        for mode, (topic, qos) in TOPIC_OUTPUTS.items():
+            self.pubs[mode] = self.create_lifecycle_publisher(Image, topic, qos)
+            self.get_logger().info(f"  Publicador creado: {topic}")
         self.get_logger().info("Nodo ACTIVO — esperando suscriptores …")
         return super().on_activate(state)
 
     def on_deactivate(self, state: State) -> TransitionCallbackReturn:
         self.get_logger().info("Nodo INACTIVO — liberando recursos pesados …")
         self._unload_models()
+        self.active_mode = None
+        for mode, pub in list(self.pubs.items()):
+            self.destroy_lifecycle_publisher(pub)
+        self.pubs.clear()
         return super().on_deactivate(state)
 
     # -----------------------------------------------------------------------
