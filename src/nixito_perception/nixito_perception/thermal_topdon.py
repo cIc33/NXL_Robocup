@@ -1,16 +1,49 @@
 import cv2
 import numpy as np
 import rclpy
+import os
+import glob
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
+
+
+def find_tc001_device():
+    """
+    Busca el dispositivo /dev/videoX de la cámara Topdon TC001
+    comparando Vendor ID (0x0bda) y Product ID (0x5830) en sysfs.
+    Retorna la ruta del dispositivo o None si no se encuentra.
+    """
+    TC001_VENDOR_ID = '0bda'
+    TC001_PRODUCT_ID = '5830'
+
+    for video_path in sorted(glob.glob('/sys/class/video4linux/video*')):
+        try:
+            real_path = os.path.realpath(video_path)
+            parts = real_path.split('/')
+            for i in range(len(parts), 0, -1):
+                parent = '/'.join(parts[:i])
+                vendor_file = os.path.join(parent, 'idVendor')
+                product_file = os.path.join(parent, 'idProduct')
+                if os.path.exists(vendor_file) and os.path.exists(product_file):
+                    with open(vendor_file) as vf, open(product_file) as pf:
+                        vendor = vf.read().strip()
+                        product = pf.read().strip()
+                    if vendor == TC001_VENDOR_ID and product == TC001_PRODUCT_ID:
+                        dev_name = os.path.basename(video_path)
+                        return f'/dev/{dev_name}'
+                    break
+        except (OSError, PermissionError):
+            continue
+
+    return None
 
 
 class TC001ThermalNode(Node):
     def __init__(self):
         super().__init__('tc001_thermal_node')
 
-        # Parámetros de la cámara
+        # Parámetros de imagen
         self.width = 256
         self.height = 192
         self.scale = 3
@@ -21,13 +54,31 @@ class TC001ThermalNode(Node):
         self.publisher = self.create_publisher(Image, 'thermal/image_raw', 10)
         self.bridge = CvBridge()
 
-        # Captura del dispositivo
-        self.cap = cv2.VideoCapture('/dev/video8', cv2.CAP_V4L)
+        # Detección automática con opción de override por parámetro ROS
+        self.declare_parameter('device', '')
+        device_param = self.get_parameter('device').get_parameter_value().string_value
+
+        if device_param:
+            device_path = device_param
+            self.get_logger().info(f'Usando dispositivo por parámetro: {device_path}')
+        else:
+            device_path = find_tc001_device()
+            if device_path:
+                self.get_logger().info(f'TC001 detectada automáticamente en: {device_path}')
+            else:
+                self.get_logger().error(
+                    'No se encontró la cámara TC001. '
+                    'Verifica que esté conectada o usa: --ros-args -p device:=/dev/videoX'
+                )
+                raise RuntimeError('Cámara TC001 no encontrada')
+
+        # Abrir captura
+        self.cap = cv2.VideoCapture(device_path, cv2.CAP_V4L)
         self.cap.set(cv2.CAP_PROP_CONVERT_RGB, 0.0)
 
         if not self.cap.isOpened():
-            self.get_logger().error('No se pudo abrir /dev/video2')
-            raise RuntimeError('No se pudo abrir la cámara TC001')
+            self.get_logger().error(f'No se pudo abrir {device_path}')
+            raise RuntimeError(f'No se pudo abrir la cámara TC001 en {device_path}')
 
         # Timer a ~25 Hz
         self.timer = self.create_timer(0.04, self.timer_callback)
@@ -62,7 +113,7 @@ class TC001ThermalNode(Node):
         himin = thdata[lcol][lrow][0]
         mintemp = round(((himin + lomin * 256) / 64) - 273.15, 2)
 
-        # --- Temperatura promedio (para threshold de puntos) ---
+        # --- Temperatura promedio (threshold para puntos) ---
         loavg = thdata[..., 1].mean()
         hiavg = thdata[..., 0].mean()
         avgtemp = round(((loavg * 256 + hiavg) / 64) - 273.15, 2)
