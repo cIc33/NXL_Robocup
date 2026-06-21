@@ -25,12 +25,12 @@ def generate_launch_description():
         output='screen'
     )
 
-    gopro_camera = Node(
-        package='nixito_perception',
-        executable='gopro',
-        name='gopro_camera',
-        output='screen',
+
+    ffplay = ExecuteProcess(
+        cmd=['ffplay', '/dev/video42'],
+        output='screen'
     )
+
     thermal_camera = Node(
         package='nixito_perception',
         executable='thermal',
@@ -53,26 +53,6 @@ def generate_launch_description():
         name='vision_maze',
         namespace='maze',
         output='screen'
-    )
-
-    cam_trasera = Node(
-        package='usb_cam',
-        executable="usb_cam_node_exe",
-        name="usb_cam",
-        namespace='reversa',
-        output='screen',
-        parameters=[{
-        'video_device': '/dev/video8',
-        'image_width': 640,
-        'image_height': 480,
-        'framerate': 30.0,
-        'io_method': 'mmap',
-        'brightness': -1,
-        'contrast': -1,
-        'saturation': -1,
-        'sharpness': -1,
-        'autofocus': True,
-        }]
     )
 
     configure_vision = EmitEvent(
@@ -99,21 +79,15 @@ def generate_launch_description():
     )
 
     # ── Esperar que ffmpeg confirme que está escribiendo al device ──────
-    camera_launched = [False]
+    ffplay_launched = [False]
 
     def check_video_ready(event):
-        if camera_launched[0]:
-            return []
-        try:
-            text = event.text.decode(errors='ignore')
-        except Exception:
-            return []
-        # Esta línea aparece en stderr de ffmpeg justo cuando empieza
-        # a escribir frames a /dev/video42
-        if 'video4linux2' in text:
-            camera_launched[0] = True
-            return [gopro_camera]
-        return []
+        if ffplay_launched[0]:
+            return[]
+        if 'video4linux2' in event.text.decode():
+            ffplay_launched[0] = True
+            return[ffplay]
+        return[]
 
     esperar_video = RegisterEventHandler(
         OnProcessIO(
@@ -127,7 +101,6 @@ def generate_launch_description():
         gopro,
         esperar_video,
         realsense,
-        cam_trasera,
         thermal_camera,
         foxglove,
         vision_node,
