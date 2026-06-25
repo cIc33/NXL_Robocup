@@ -1,0 +1,74 @@
+* comando de inicio del launch de vision:
+
+ros2 launch nixito_bringup vision.launch.py
+
+* Asegurate de estar en la carpeta correcta:
+
+cd NXL_Robocup
+
+* Si al momento de ejecutar el launch aparece este mensaje de error:
+"Package 'nixito_bringup' not found: "package 'nixito_bringup' not found, searching: ['/opt/ros/humble']"
+Sourcea tu terminal:
+
+source install/setup.bash #no importa en que path 
+
+* Si al momento de hacer cambios en los scripts no se reflejan al ejecutar:
+
+colcon build # solo si quieres compilar en todos los paquetes
+
+colcon build --packages-select <name_of_package> # solo si quieres compilar el paquete que cambiaste
+
+* Si al ejecutar el launch de vision, no aparece la ventana de la gopro
+debes escribir la contraseña del sistema solo la primera vez que lo ejecutes
+despues no abra problema.
+
+* si la pantalla de la gopro al momento de ejecutar cambia de usb conectado a el modo webcam
+da a entender que esta funcionando correctamente.
+
+* Al momento de ejecutar y si ya escribieron la contraseña se vera como se reinicia la gopro
+automaticamente como esta en el launch, despues de reiniciar se tendra que ver el icono de "webcam"
+en rojo indicando que ya esta enviando video. Si llega a pasar que no se reinicia la gopro:
+
+curl -s http://172.23.197.51:8080/gp/gpWebcam/STOP
+
+esto detiene el video, cuando se vea el icono de webcam en gris ya se puede volver a ejecutar.
+
+* si se quiere activar la camara manuelmente sin el launch, primero se debe ir a la carpeta correspondiente:
+
+cd /home/angel/NXL_Robocup/src/nixito_perception/drivers/gopro_as_webcam_on_linux
+
+* despues ejecutar este comando:
+
+sudo ./gopro webcam -a -n -r 480 -i 172.23.197.51
+
+* esto activara el modo webcam de la gopro, si se quiere visualizar el video:
+
+ffplay /dev/video42
+
+* si, el video de la gopro tiene distorcion en las vibraciones o en movimientos bruscos
+prueba a reiniciar el sistema
+
+* Despues de activar cualquier de los dos scripts en la interfaz, NO INTENTAR ACTIVAR cuando ya esta activo
+el script va a crashaer y van a tener que ejecutar de nuevo
+
+* Asegurarse de conectar la realsense en el puerto usb-c no el hub
+
+* Cuando se activa el vision maze se suma un numero de vision y se crea el csv, asi que solo actuvar
+cuando sea necesario
+
+* El comando para activar la realsense manuelmente es este: 
+
+ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true rgb_camera.color_profile:=640x480x30
+
+* Los topicos tanto de maze y vision solo aparecen cuando se activan.
+
+
+
+
+
+
+
+
+
+
+

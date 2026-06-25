@@ -2,19 +2,22 @@ from launch import LaunchDescription
 from launch.actions import EmitEvent, ExecuteProcess, RegisterEventHandler
 from launch_ros.actions import Node, LifecycleNode
 from launch_ros.events.lifecycle import ChangeState
-from launch.event_handlers import OnProcessIO
+from launch.event_handlers import OnProcessIO, OnProcessExit
 from lifecycle_msgs.msg import Transition
 
 
 def generate_launch_description():
-
     restart_gopro = ExecuteProcess(
         cmd=['curl', '-s', 'http://172.23.197.51:8080/gp/gpWebcam/STOP'],
         output='screen'
     )
 
     realsense = ExecuteProcess(
-        cmd= ['ros2', 'launch', 'realsense2_camera', 'rs_launch.py', 'align_depth.enable:=true'],
+        cmd=[
+            'ros2', 'launch', 'realsense2_camera', 'rs_launch.py',
+            'align_depth.enable:=true',
+            'rgb_camera.color_profile:=640x480x30',
+        ],
         cwd='/home/angel',
         output='screen'
     )
@@ -24,7 +27,6 @@ def generate_launch_description():
         cwd='/home/angel/NXL_Robocup/src/nixito_perception/drivers/gopro_as_webcam_on_linux',
         output='screen'
     )
-
 
     ffplay = ExecuteProcess(
         cmd=['ffplay', '/dev/video42'],
@@ -46,7 +48,7 @@ def generate_launch_description():
         namespace='',
         output='screen'
     )
-    
+
     vision_maze = LifecycleNode(
         package='nixito_perception',
         executable='vision_maze',
@@ -61,12 +63,13 @@ def generate_launch_description():
             transition_id=Transition.TRANSITION_CONFIGURE,
         )
     )
+
     configure_maze = EmitEvent(
-    event=ChangeState(
-        lifecycle_node_matcher=lambda action: action == vision_maze,
-        transition_id=Transition.TRANSITION_CONFIGURE,
+        event=ChangeState(
+            lifecycle_node_matcher=lambda action: action == vision_maze,
+            transition_id=Transition.TRANSITION_CONFIGURE,
+        )
     )
-)
 
     foxglove = Node(
         package='foxglove_bridge',
@@ -78,16 +81,30 @@ def generate_launch_description():
         }]
     )
 
-    # ── Esperar que ffmpeg confirme que está escribiendo al device ──────
+    # ── Esperar a que el curl STOP termine antes de arrancar el gopro ──
+    lanzar_gopro_tras_stop = RegisterEventHandler(
+        OnProcessExit(
+            target_action=restart_gopro,
+            on_exit=[gopro],
+        )
+    )
+
+    # ── Esperar a que ffmpeg confirme que está escribiendo al device ───
     ffplay_launched = [False]
 
     def check_video_ready(event):
         if ffplay_launched[0]:
-            return[]
-        if 'video4linux2' in event.text.decode():
+            return []
+        try:
+            text = event.text.decode(errors='ignore')
+        except Exception:
+            return []
+        # Esta línea aparece en stderr de ffmpeg justo cuando empieza
+        # a escribir frames a /dev/video42
+        if 'video4linux2' in text:
             ffplay_launched[0] = True
-            return[ffplay]
-        return[]
+            return [ffplay]
+        return []
 
     esperar_video = RegisterEventHandler(
         OnProcessIO(
@@ -98,7 +115,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         restart_gopro,
-        gopro,
+        lanzar_gopro_tras_stop,
         esperar_video,
         realsense,
         thermal_camera,
