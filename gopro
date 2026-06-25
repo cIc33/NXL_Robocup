@@ -8,5 +8,5 @@ sudo ip addr add 172.23.197.100/24 dev enxbe7b134567eb
 
 
 
-lectura serial THS1
-sudo stty -F /dev/ttyTHS1 115200 raw -echo && sudo cat /dev/ttyTHS1
+lectura serial ttyUSB0
+sudo stty -F /dev/ttyUSB0 115200 raw -echo && sudo cat /dev/ttyUSB0

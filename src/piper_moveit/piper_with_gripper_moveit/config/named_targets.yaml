@@ -94,7 +94,7 @@ targets:
     type: joint
     group: gripper
     joints:
-      joint7: 0.035
+      joint7: 0.1
 
   close:
     type: joint

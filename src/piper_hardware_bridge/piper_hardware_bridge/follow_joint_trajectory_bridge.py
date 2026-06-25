@@ -20,8 +20,8 @@ class PiperFollowJointTrajectoryBridge(Node):
         self.declare_parameter('joint_command_topic', '/piper/joint_ctrl_cmd')
         self.declare_parameter('arm_action_name', '/arm_controller/follow_joint_trajectory')
         self.declare_parameter('gripper_action_name', '/gripper_controller/follow_joint_trajectory')
-        self.declare_parameter('publish_rate', 50.0)
-        self.declare_parameter('driver_speed_percent', 20.0)
+        self.declare_parameter('publish_rate', 30.0)
+        self.declare_parameter('driver_speed_percent', 60.0)
         self.declare_parameter('gripper_effort', 1.0)
         self.declare_parameter('goal_state_timeout', 2.0)
 
@@ -35,7 +35,9 @@ class PiperFollowJointTrajectoryBridge(Node):
         self.goal_state_timeout = float(self.get_parameter('goal_state_timeout').value)
 
         self.current_state = {}
+        self.held_gripper = 0.0
         self.create_subscription(JointState, self.joint_states_topic, self.joint_state_callback, 10)
+        self.create_subscription(JointState, self.joint_command_topic, self.command_echo_callback, 10)
         self.command_publisher = self.create_publisher(JointState, self.joint_command_topic, 10)
 
         self.arm_server = ActionServer(
@@ -66,6 +68,13 @@ class PiperFollowJointTrajectoryBridge(Node):
             for index, name in enumerate(msg.name)
             if index < len(msg.position)
         }
+
+    def command_echo_callback(self, msg: JointState):
+        # Track the last gripper value actually sent to the driver (by any bridge).
+        # Motor feedback is unreliable when the gripper is soft — using the commanded
+        # value avoids closing the gripper to 0 when a trajectory starts.
+        if len(msg.position) >= 7:
+            self.held_gripper = float(msg.position[6])
 
     def goal_callback(self, _goal_request):
         return GoalResponse.ACCEPT
@@ -107,80 +116,69 @@ class PiperFollowJointTrajectoryBridge(Node):
         return result
 
     def execute_gripper_goal(self, goal_handle):
-        goal = goal_handle.request
+        # Gripper is controlled exclusively via the velocity bridge GUI.
+        # Accept MoveIt gripper goals immediately without executing them so MoveIt
+        # doesn't interfere with the current gripper position.
         result = FollowJointTrajectory.Result()
-
-        if not self.wait_for_state():
-            result.error_code = FollowJointTrajectory.Result.INVALID_GOAL
-            result.error_string = 'No /joint_states feedback available'
-            goal_handle.abort()
-            return result
-
-        if not goal.trajectory.points:
-            result.error_code = FollowJointTrajectory.Result.INVALID_GOAL
-            result.error_string = 'Trajectory has no points'
-            goal_handle.abort()
-            return result
-
-        joint_name = goal.trajectory.joint_names[0] if goal.trajectory.joint_names else 'joint7'
-        for point in goal.trajectory.points:
-            if goal_handle.is_cancel_requested:
-                goal_handle.canceled()
-                return result
-            if not point.positions:
-                continue
-            gripper_position = max(0.0, point.positions[0])
-            arm_positions = [self.current_state.get(name, 0.0) for name in self.ARM_JOINTS]
-            self.publish_joint_command(arm_positions, gripper_position)
-            sleep_time = self.duration_to_seconds(point.time_from_start)
-            time.sleep(max(0.02, min(0.5, sleep_time)))
-
         result.error_code = FollowJointTrajectory.Result.SUCCESSFUL
-        result.error_string = f'Executed gripper trajectory for {joint_name}'
         goal_handle.succeed()
         return result
 
     def execute_points(self, goal_handle, joint_names, points, start_positions):
-        previous_positions = list(start_positions)
-        previous_time = 0.0
+        if not points:
+            return True
 
+        period = 1.0 / self.publish_rate
+        total_duration = self.duration_to_seconds(points[-1].time_from_start)
+
+        # Use the last commanded gripper value, not motor feedback. The gripper motor
+        # goes soft when idle and its feedback drops to 0, which would cause the trajectory
+        # to command GripperCtrl(0) and close the gripper.
+        fixed_gripper = self.held_gripper
+
+        joint_indices = {name: i for i, name in enumerate(joint_names)}
+        waypoints = [(0.0, list(start_positions))]
         for point in points:
-            if goal_handle.is_cancel_requested:
-                goal_handle.canceled()
-                return False
             if len(point.positions) < len(joint_names):
                 goal_handle.abort()
                 return False
+            t = self.duration_to_seconds(point.time_from_start)
+            positions = [
+                point.positions[joint_indices[name]]
+                if name in joint_indices and joint_indices[name] < len(point.positions)
+                else start_positions[i]
+                for i, name in enumerate(self.ARM_JOINTS)
+            ]
+            waypoints.append((t, positions))
 
-            desired_by_name = {
-                name: point.positions[index]
-                for index, name in enumerate(joint_names)
-                if index < len(point.positions)
-            }
-            target_positions = [desired_by_name.get(name, previous_positions[index]) for index, name in enumerate(self.ARM_JOINTS)]
-            target_time = self.duration_to_seconds(point.time_from_start)
-            segment_duration = max(0.0, target_time - previous_time)
-            self.publish_interpolated_segment(previous_positions, target_positions, segment_duration)
-            previous_positions = target_positions
-            previous_time = target_time
+        start_wall = time.monotonic()
+
+        while True:
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                return False
+
+            elapsed = time.monotonic() - start_wall
+            positions = self._interpolate_at_time(waypoints, min(elapsed, total_duration))
+            self.publish_joint_command(positions, fixed_gripper)
+
+            if elapsed >= total_duration:
+                break
+
+            time.sleep(period)
 
         return True
 
-    def publish_interpolated_segment(self, start_positions, target_positions, duration):
-        if duration <= 0.0:
-            self.publish_joint_command(target_positions, self.get_current_gripper_position())
-            return
-
-        steps = max(1, int(duration * self.publish_rate))
-        sleep_time = duration / steps
-        for step in range(1, steps + 1):
-            ratio = step / steps
-            positions = [
-                start + (target - start) * ratio
-                for start, target in zip(start_positions, target_positions)
-            ]
-            self.publish_joint_command(positions, self.get_current_gripper_position())
-            time.sleep(sleep_time)
+    def _interpolate_at_time(self, waypoints, t):
+        for i in range(1, len(waypoints)):
+            t0, pos0 = waypoints[i - 1]
+            t1, pos1 = waypoints[i]
+            if t <= t1:
+                if t1 <= t0:
+                    return list(pos1)
+                ratio = (t - t0) / (t1 - t0)
+                return [p0 + (p1 - p0) * ratio for p0, p1 in zip(pos0, pos1)]
+        return list(waypoints[-1][1])
 
     def publish_joint_command(self, arm_positions, gripper_position):
         msg = JointState()

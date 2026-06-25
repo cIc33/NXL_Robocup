@@ -297,7 +297,6 @@ class PiperRosNode(Node):
 
         # 遍历joint_data.name来映射位置
         for idx, joint_name in enumerate(joint_data.name):
-            self.get_logger().info(f"{joint_name}: {joint_data.position[idx]}")
             joint_positions[joint_name] = round(joint_data.position[idx] * factor)
         
         # 获取第7个关节的位置
@@ -316,7 +315,6 @@ class PiperRosNode(Node):
                 lens = len(joint_data.velocity)
                 if lens == 7:
                     vel_all = clip(round(joint_data.velocity[6]), 1, 100)
-                    self.get_logger().info(f"vel_all: {vel_all}")
                     self.piper.MotionCtrl_2(0x01, 0x01, vel_all)
                 else:
                     self.piper.MotionCtrl_2(0x01, 0x01, 100)

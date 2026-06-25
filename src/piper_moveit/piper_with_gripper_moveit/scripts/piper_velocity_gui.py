@@ -4,7 +4,7 @@ from tkinter import ttk
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32MultiArray, Int32
 
 
 class PiperVelocityGuiNode(Node):
@@ -12,23 +12,29 @@ class PiperVelocityGuiNode(Node):
         super().__init__('piper_velocity_gui')
 
         self.declare_parameter('topic_name', '/piper/test_velocity_cmd')
+        self.declare_parameter('switch_mode_topic', '/piper/switch_mode')
         self.declare_parameter('publish_rate', 20.0)
 
         self.topic_name = str(self.get_parameter('topic_name').value)
+        self.switch_mode_topic = str(self.get_parameter('switch_mode_topic').value)
         self.publish_rate = max(1.0, float(self.get_parameter('publish_rate').value))
-        
-        # Publicador para el arreglo de velocidades
+
         self.publisher = self.create_publisher(Float32MultiArray, self.topic_name, 10)
+        self.switch_mode_publisher = self.create_publisher(Int32, self.switch_mode_topic, 10)
 
         self.get_logger().info(
             f'Piper velocity GUI publishing to {self.topic_name} at {self.publish_rate:.1f} Hz.'
         )
 
     def publish_velocities(self, velocities: list):
-        """Empaqueta y publica los valores de los sliders."""
         msg = Float32MultiArray()
         msg.data = velocities
         self.publisher.publish(msg)
+
+    def publish_switch_mode(self, cartesian: bool):
+        msg = Int32()
+        msg.data = 1 if cartesian else 0
+        self.switch_mode_publisher.publish(msg)
 
 
 class VelocityGui:
@@ -127,10 +133,9 @@ class VelocityGui:
         self.gripper_label.configure(text=f'{self.gripper_var.get():.2f}')
 
     def _update_mode_status(self):
-        if self.is_cartesian.get():
-            self.status_var.set('Publishing Cartesian mode')
-        else:
-            self.status_var.set('Publishing Joint mode')
+        cartesian = self.is_cartesian.get()
+        self.status_var.set('Publishing Cartesian mode' if cartesian else 'Publishing Joint mode')
+        self.node.publish_switch_mode(cartesian)
 
     def zero_commands(self):
         for var in self.command_vars:

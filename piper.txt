@@ -1,0 +1,27 @@
+
+La secuencia completa :
+
+ Cargar módulo gs_usb 
+  # 1 . 
+  sudo insmod /home/nixito/gs_usb_module/gs_usb.ko
+
+  # 2. Levantar la interfaz CAN
+  sudo ip link set can2 up type can bitrate 1000000
+
+   # 3. Verificar que quedó activo:
+  ip link show can2
+
+  Debe mostrar UP y RUNNING. Después ya puedes lanzar:
+
+  
+ # 4. 
+  source install/setup.bash
+  ros2 launch nixito_bringup nixito_piper.launch.py can_port:=can2
+
+  
+
+
+#---- Verificar posicion joints------
+  source install/setup.bash
+  ros2 run piper_hardware_bridge piper_joint_state_reader --can-port can2
+

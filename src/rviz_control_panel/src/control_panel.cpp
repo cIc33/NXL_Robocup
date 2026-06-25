@@ -1,5 +1,6 @@
 #include "rviz_control_panel/control_panel.hpp"
 
+#include <QFrame>
 #include <QMetaObject>
 #include <QString>
 #include <chrono>
@@ -7,6 +8,7 @@
 #include <rviz_common/display_context.hpp>
 
 #include <std_msgs/msg/int32.hpp>
+#include <std_msgs/msg/string.hpp>
 
 namespace rviz_control_panel
 {
@@ -33,39 +35,43 @@ void ControlPanel::onInitialize()
 
   updateStatus("Estado: panel inicializado");
 
-  /*
-   * AQUÍ AGREGAS TUS SWITCHES / BOTONES LATCH
-   *
-   * Formato:
-   *
-   * addLatchedInt32TopicButton(
-   *   "Texto del botón",
-   *   "/nombre_del_topico",
-   *   valor_cuando_esta_activado,
-   *   valor_cuando_esta_desactivado,
-   *   estado_inicial);
-   */
+  named_target_pub_ = node_->create_publisher<std_msgs::msg::String>(NAMED_TARGET_TOPIC, 10);
+
+  // ── Switches ──────────────────────────────────────────────
+  addSectionLabel("── Modos ──");
 
   addLatchedInt32TopicButton(
     "Object Detection",
     "/object_detection_enable",
-    1,
-    0,
-    false);
+    1, 0, false);
 
-  addLatchedInt32TopicButton(
-    "Modo Manual",
-    "/piper/switch_mode",
-    1,
-    0,
-    false);
+  //addLatchedInt32TopicButton(
+    //"Modo Manual",
+   //"/piper/switch_mode",
+    //1, 0, false);
 
   addLatchedInt32TopicButton(
     "Gripper Enable",
     "/gripper_enable",
-    1,
-    0,
-    false);
+    1, 0, false);
+
+  // ── Posiciones preestablecidas ────────────────────────────
+  addSectionLabel("── Posiciones ──");
+
+  addNamedTargetButton("Zero",          "zero");
+  addNamedTargetButton("Home",          "home");
+  addNamedTargetButton("Escape",        "escape");
+  addNamedTargetButton("Stow",          "stow");
+  addNamedTargetButton("Observe Front", "observe_front");
+  addNamedTargetButton("Observe Left",  "observe_left");
+  addNamedTargetButton("Observe Right", "observe_right");
+  addNamedTargetButton("Pre-Grasp",     "pregrasp");
+
+  // ── Gripper ───────────────────────────────────────────────
+  addSectionLabel("── Gripper ──");
+
+  addNamedTargetButton("Abrir",  "open");
+  addNamedTargetButton("Cerrar", "close");
 }
 
 void ControlPanel::addLatchedInt32TopicButton(
@@ -133,6 +139,29 @@ void ControlPanel::addLatchedInt32TopicButton(
         true);
     });
 }
+void ControlPanel::addSectionLabel(const QString & text)
+{
+  auto label = new QLabel(text, this);
+  label->setAlignment(Qt::AlignCenter);
+  main_layout_->addWidget(label);
+}
+
+void ControlPanel::addNamedTargetButton(const QString & label, const std::string & target_name)
+{
+  auto button = new QPushButton(label, this);
+  main_layout_->addWidget(button);
+  connect(
+    button, &QPushButton::clicked, this,
+    [this, label, target_name]()
+    {
+      std_msgs::msg::String msg;
+      msg.data = target_name;
+      named_target_pub_->publish(msg);
+      updateStatus(QString("Enviando: %1").arg(label));
+      RCLCPP_INFO(node_->get_logger(), "Named target: %s", target_name.c_str());
+    });
+}
+
 void ControlPanel::publishInt32Topic(
   const std::string & topic_name,
   int value,

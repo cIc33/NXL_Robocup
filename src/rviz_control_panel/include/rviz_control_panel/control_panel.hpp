@@ -14,6 +14,7 @@
 #include <rviz_common/ros_integration/ros_node_abstraction_iface.hpp>
 
 #include <std_msgs/msg/int32.hpp>
+#include <std_msgs/msg/string.hpp>
 
 namespace rviz_control_panel
 {
@@ -36,6 +37,12 @@ private:
     int unchecked_value,
     bool initial_state = false);
 
+  void addNamedTargetButton(
+    const QString & label,
+    const std::string & target_name);
+
+  void addSectionLabel(const QString & text);
+
   void publishInt32Topic(
     const std::string & topic_name,
     int value,
@@ -52,6 +59,9 @@ private:
   std::map<std::string, rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr> int32_publishers_;
   std::map<std::string, int> int32_states_;
   std::map<std::string, rclcpp::TimerBase::SharedPtr> int32_timers_;
+
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr named_target_pub_;
+  static constexpr const char * NAMED_TARGET_TOPIC = "/piper/named_target";
 };
 
 }  // namespace rviz_control_panel

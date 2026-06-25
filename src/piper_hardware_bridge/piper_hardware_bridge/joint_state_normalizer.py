@@ -44,9 +44,11 @@ class PiperJointStateNormalizer(Node):
             gripper = positions.get(self.gripper_input_name, positions.get('joint7', 0.0))
             gripper_velocity = velocities.get(self.gripper_input_name, velocities.get('joint7', 0.0))
             gripper_effort = efforts.get(self.gripper_input_name, efforts.get('joint7', 0.0))
+            # SDK reports total gap between fingers; URDF models per-finger displacement (half)
+            gripper_per_finger = max(0.0, gripper) / 2.0
             output.name.extend(['joint7', 'joint8'])
-            output.position.extend([max(0.0, gripper), -max(0.0, gripper)])
-            output.velocity.extend([gripper_velocity, -gripper_velocity])
+            output.position.extend([gripper_per_finger, -gripper_per_finger])
+            output.velocity.extend([gripper_velocity / 2.0, -gripper_velocity / 2.0])
             output.effort.extend([gripper_effort, -gripper_effort])
 
         self.publisher.publish(output)

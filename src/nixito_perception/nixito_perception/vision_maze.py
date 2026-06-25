@@ -7,13 +7,13 @@ from cv_bridge import CvBridge
 from ultralytics import YOLO
 from datetime import datetime
 from pathlib import Path
-from nixito_msgs.msg import Detection          # <── mensaje custom
+from nixito_msgs.msg import Detection
 import threading
 import csv
 import cv2
 import numpy as np
 import time
-import math                                    # <── NUEVO: para atan2/degrees
+import math
 
 
 # ── Clases ────────────────────────────────────────────────────────────────────
@@ -59,15 +59,15 @@ AT_HOLD_SECS           = 0.15
 AT_MIN_PERIOD          = 0.05
 AT_DETECT_WIDTH        = 640
 
-QR_MODEL_DIR = '/home/angel/NXL_Robocup/src/nixito_perception/drivers/qr_models'
-MODEL_PATH   = '/home/angel/NXL_Robocup/src/nixito_perception/modelos/Robocup_NXL.pt'
+QR_MODEL_DIR = '/home/nixito/NXL_Robocup/src/nixito_perception/drivers/qr_models'
+MODEL_PATH   = '/home/nixito/NXL_Robocup/src/nixito_perception/modelos/Robocup_NXL.pt'
 
-PKG_DIR      = Path('/home/angel/NXL_Robocup/src/nixito_perception/nixito_perception/csv')
+PKG_DIR      = Path('/home/nixito/NXL_Robocup/src/nixito_perception/nixito_perception/csv')
 MISSION_FILE = PKG_DIR / 'mission.txt'
 CSV_DIR      = PKG_DIR / 'csv'
 
 
-class DetectorNode(LifecycleNode):
+class MazeNode(LifecycleNode):
     def __init__(self):
         super().__init__('detector_node')
 
@@ -80,7 +80,12 @@ class DetectorNode(LifecycleNode):
 
         self.latest_frame   = None
         self.latest_header  = None
-        self.last_annotated = None
+
+        # Anotaciones por topico (independientes)
+        self.last_annotated_yolo = None
+        self.last_annotated_qr   = None
+        self.last_annotated_at   = None
+
         self.lock           = threading.Lock()
         self._frame_event   = threading.Event()
 
@@ -128,15 +133,12 @@ class DetectorNode(LifecycleNode):
         self.confidence_threshold = self.get_parameter('confidence_threshold').value
         self.min_confirmations    = self.get_parameter('min_confirmations').value
 
-        # ── Publicadores ──────────────────────────────────────────────────────
+        # ── Publicador de detecciones (común) ───────────────────────────────
         self._pub_detection = self.create_lifecycle_publisher(
-            Detection, 'detection', 10          # topic único con toda la info
-        )
-        self._pub_annotated = self.create_lifecycle_publisher(
-            Image, 'detection/annotated', 10
+            Detection, 'detection', 10
         )
 
-        # ── Suscripciones ─────────────────────────────────────────────────────
+        # ── Suscripciones de entrada ─────────────────────────────────────────
         self._sub_image = self.create_subscription(
             Image, self._image_topic, self._image_callback, 10)
         self._sub_info  = self.create_subscription(
@@ -144,6 +146,11 @@ class DetectorNode(LifecycleNode):
         self._sub_depth = self.create_subscription(
             Image, '/camera/camera/aligned_depth_to_color/image_raw',
             self._depth_callback, 10)
+
+        # Los publicadores de imagen anotada por topico se crean en on_activate
+        self._pub_annotated_yolo = None
+        self._pub_annotated_qr   = None
+        self._pub_annotated_at   = None
 
         self.get_logger().info('Configurado — listo para activar')
         return TransitionCallbackReturn.SUCCESS
@@ -154,6 +161,18 @@ class DetectorNode(LifecycleNode):
         if not self._csv_ready:
             self.csv_file, self.csv_writer = self._init_csv()
             self._csv_ready = True
+
+        # ── Crear los topicos de imagen anotada SOLO al activar ──────────────
+        self._pub_annotated_yolo = self.create_lifecycle_publisher(
+            Image, 'detection/yolo/annotated', 10
+        )
+        self._pub_annotated_qr = self.create_lifecycle_publisher(
+            Image, 'detection/qr/annotated', 10
+        )
+        self._pub_annotated_at = self.create_lifecycle_publisher(
+            Image, 'detection/apriltag/annotated', 10
+        )
+
         self.get_logger().info('ACTIVO')
         return super().on_activate(state)
 
@@ -162,6 +181,23 @@ class DetectorNode(LifecycleNode):
         self._frame_event.clear()
         self._unload_models()
         self.detection_counts.clear()
+
+        # ── Destruir los topicos de imagen anotada al desactivar ─────────────
+        if self._pub_annotated_yolo is not None:
+            self.destroy_lifecycle_publisher(self._pub_annotated_yolo)
+            self._pub_annotated_yolo = None
+        if self._pub_annotated_qr is not None:
+            self.destroy_lifecycle_publisher(self._pub_annotated_qr)
+            self._pub_annotated_qr = None
+        if self._pub_annotated_at is not None:
+            self.destroy_lifecycle_publisher(self._pub_annotated_at)
+            self._pub_annotated_at = None
+
+        with self.lock:
+            self.last_annotated_yolo = None
+            self.last_annotated_qr   = None
+            self.last_annotated_at   = None
+
         self.get_logger().info('INACTIVO')
         return super().on_deactivate(state)
 
@@ -267,7 +303,6 @@ class DetectorNode(LifecycleNode):
     def pixel_to_yaw(self, u: int) -> float:
         """
         Ángulo horizontal (yaw) en grados desde el centro óptico de la cámara.
-        Usa los intrínsecos reales de la RealSense (cx, fx) para máxima precisión.
 
         Retorna:
             yaw_deg > 0  →  objeto a la DERECHA del centro óptico
@@ -315,8 +350,8 @@ class DetectorNode(LifecycleNode):
         """Escribe directamente desde el mensaje — sin duplicar lógica."""
         if not self._csv_ready or self.csv_writer is None:
             return
-        x =''
-        y =''
+        x = ''
+        y = ''
         z = f'{msg.z:.3f}' if msg.z != -1.0 else ''
         self.csv_writer.writerow([
             msg.detection_id,
@@ -341,6 +376,12 @@ class DetectorNode(LifecycleNode):
                            coords_3d=None,
                            yaw_deg: float = 0.0,
                            header=None):
+        """
+        Mantiene un único contador (self.detection_counter) y un único
+        diccionario de cooldown (self._last_published_time) compartidos
+        entre los tres detectores, para garantizar consistencia de IDs
+        y de tiempos entre tópicos.
+        """
         now  = time.time()
         last = self._last_published_time.get(label, 0.0)
         if now - last < DETECTION_COOLDOWN:
@@ -411,7 +452,7 @@ class DetectorNode(LifecycleNode):
                 value, pts_ann = text, pts_in_frame
                 break
         new_detection = qr_coords = None
-        qr_yaw = 0.0                                          # <── inicializar
+        qr_yaw = 0.0
         if pts_ann is not None:
             self._qr_last_value = value
             self._qr_last_pts   = pts_ann
@@ -420,12 +461,12 @@ class DetectorNode(LifecycleNode):
                 self._qr_published.add(value)
                 new_detection = value
                 pts_i  = np.int32(pts_ann).reshape(-1, 2)
-                cx_qr  = int(pts_i[:, 0].mean() * scale_x)   # <── centro en espacio original
+                cx_qr  = int(pts_i[:, 0].mean() * scale_x)
                 cy_qr  = int(pts_i[:, 1].mean() * scale_y)
                 qr_coords = self.pixel_to_3d(cx_qr, cy_qr)
-                qr_yaw    = self.pixel_to_yaw(cx_qr)          # <── NUEVO
+                qr_yaw    = self.pixel_to_yaw(cx_qr)
         self._draw_qr_overlay(frame, now - self._qr_last_seen, scale_x, scale_y)
-        return frame, new_detection, qr_coords, qr_yaw        # <── retorna 4 valores
+        return frame, new_detection, qr_coords, qr_yaw
 
     def _draw_qr_overlay(self, frame, age, scale_x, scale_y):
         if age >= QR_HOLD_SECS or self._qr_last_pts is None:
@@ -487,8 +528,8 @@ class DetectorNode(LifecycleNode):
                 }
                 if tag_key not in self._at_published:
                     self._at_published.add(tag_key)
-                    at_yaw = self.pixel_to_yaw(int(cx_ann * scale_x))   # <── NUEVO
-                    new_detections.append((tag_key, tag_label, coords_3d, at_yaw))  # <── 4 valores
+                    at_yaw = self.pixel_to_yaw(int(cx_ann * scale_x))
+                    new_detections.append((tag_key, tag_label, coords_3d, at_yaw))
         for key in list(self._at_last_detections.keys()):
             if now - self._at_last_detections[key]['seen_time'] > AT_HOLD_SECS * 10:
                 del self._at_last_detections[key]
@@ -525,13 +566,17 @@ class DetectorNode(LifecycleNode):
         with self.lock:
             self.latest_frame  = frame
             self.latest_header = msg.header
-            annotated          = self.last_annotated
         self._frame_event.set()
-        if self._is_active() and self._pub_annotated.get_subscription_count() > 0:
-            out            = annotated if annotated is not None else frame
-            out_msg        = self.bridge.cv2_to_imgmsg(out, encoding='bgr8')
-            out_msg.header = msg.header
-            self._pub_annotated.publish(out_msg)
+
+    def _publish_annotated(self, publisher, frame, header):
+        """Publica `frame` en `publisher` solo si hay suscriptores."""
+        if publisher is None:
+            return
+        if publisher.get_subscription_count() == 0:
+            return
+        out_msg        = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
+        out_msg.header = header
+        publisher.publish(out_msg)
 
     # =========================================================================
     # Hilo de inferencia
@@ -544,7 +589,7 @@ class DetectorNode(LifecycleNode):
                 continue
             self._frame_event.clear()
 
-            if not self._is_active() or self.model is None:
+            if not self._is_active():
                 continue
 
             with self.lock:
@@ -558,82 +603,103 @@ class DetectorNode(LifecycleNode):
             scale_x = orig_w / 640.0
             scale_y = orig_h / 360.0
 
-            small   = cv2.resize(frame, (640, 360))
-            results = self.model(
-                small, conf=self.confidence_threshold, imgsz=320, verbose=False
-            )[0]
-            annotated = results.plot()
+            small = cv2.resize(frame, (640, 360))
 
-            detected_this_frame = set()
+            run_yolo = (self._pub_annotated_yolo is not None
+                        and self._pub_annotated_yolo.get_subscription_count() > 0)
+            run_qr   = (self._pub_annotated_qr is not None
+                        and self._pub_annotated_qr.get_subscription_count() > 0)
+            run_at   = (self._pub_annotated_at is not None
+                        and self._pub_annotated_at.get_subscription_count() > 0)
 
             # ── YOLO ──────────────────────────────────────────────────────────
-            for box in results.boxes:
-                class_id   = int(box.cls.item())
-                confidence = float(box.conf.item())
-                name       = results.names[class_id]
-                detected_this_frame.add(name)
+            if run_yolo and self.model is not None:
+                results = self.model(
+                    small, conf=self.confidence_threshold, imgsz=640, verbose=False
+                )[0]
+                annotated_yolo = results.plot()
 
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                cx_ann    = int((x1+x2)/2)
-                cy_ann    = int((y1+y2)/2)
+                detected_this_frame = set()
 
-                coords_3d = self.pixel_to_3d(int(cx_ann*scale_x), int(cy_ann*scale_y))
-                yaw = self.pixel_to_yaw(int(cx_ann * scale_x))
+                for box in results.boxes:
+                    class_id   = int(box.cls.item())
+                    confidence = float(box.conf.item())
+                    name       = results.names[class_id]
+                    detected_this_frame.add(name)
 
-                # ── Visualización ─────────────────────────────────────────────
-                cv2.circle(annotated, (cx_ann, cy_ann), 6, (0, 0, 255), -1)
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    cx_ann = int((x1+x2)/2)
+                    cy_ann = int((y1+y2)/2)
 
-                dist_text = f'{coords_3d[2]:.2f}m' if coords_3d else '--'
-                cv2.putText(annotated, dist_text,
-                            (cx_ann+8, cy_ann),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    coords_3d = self.pixel_to_3d(int(cx_ann*scale_x), int(cy_ann*scale_y))
+                    yaw = self.pixel_to_yaw(int(cx_ann * scale_x))
 
-                self.detection_counts[name] = self.detection_counts.get(name, 0) + 1
-                if self.detection_counts[name] >= self.min_confirmations:
-                    det_type = self.get_detection_type(name)
-                    if det_type != 'unknown':
-                        self._publish_detection(
-                            det_type, name, confidence, coords_3d,
-                            yaw_deg=yaw,
-                            header=header
-                        )
-                    else:
-                        self.get_logger().warn(f'Clase sin mapear: {name}')
-                    self.detection_counts[name] = 0
+                    cv2.circle(annotated_yolo, (cx_ann, cy_ann), 6, (0, 0, 255), -1)
+                    dist_text = f'{coords_3d[2]:.2f}m' if coords_3d else '--'
+                    cv2.putText(annotated_yolo, dist_text,
+                                (cx_ann+8, cy_ann),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-            for name in list(self.detection_counts.keys()):
-                if name not in detected_this_frame:
-                    self.detection_counts[name] = 0
+                    self.detection_counts[name] = self.detection_counts.get(name, 0) + 1
+                    if self.detection_counts[name] >= self.min_confirmations:
+                        det_type = self.get_detection_type(name)
+                        if det_type != 'unknown':
+                            self._publish_detection(
+                                det_type, name, confidence, coords_3d,
+                                yaw_deg=yaw,
+                                header=header
+                            )
+                        else:
+                            self.get_logger().warn(f'Clase sin mapear: {name}')
+                        self.detection_counts[name] = 0
+
+                for name in list(self.detection_counts.keys()):
+                    if name not in detected_this_frame:
+                        self.detection_counts[name] = 0
+
+                self._publish_annotated(self._pub_annotated_yolo, annotated_yolo, header)
+                with self.lock:
+                    self.last_annotated_yolo = annotated_yolo
 
             # ── QR ────────────────────────────────────────────────────────────
-            annotated, qr_value, qr_coords, qr_yaw = self._process_qr(   # <── desempacar 4
-                annotated, scale_x, scale_y
-            )
-            if qr_value:
-                self._publish_detection(
-                    'ar_code', qr_value, 1.0, qr_coords,
-                    yaw_deg=qr_yaw,                                        # <── NUEVO
-                    header=header,
+            if run_qr and self.qr_detector is not None:
+                annotated_qr = small.copy()
+                annotated_qr, qr_value, qr_coords, qr_yaw = self._process_qr(
+                    annotated_qr, scale_x, scale_y
                 )
+                if qr_value:
+                    self._publish_detection(
+                        'ar_code', qr_value, 1.0, qr_coords,
+                        yaw_deg=qr_yaw,
+                        header=header,
+                    )
+
+                self._publish_annotated(self._pub_annotated_qr, annotated_qr, header)
+                with self.lock:
+                    self.last_annotated_qr = annotated_qr
 
             # ── AprilTag ──────────────────────────────────────────────────────
-            annotated, at_detections = self._process_apriltag(annotated, scale_x, scale_y)
-            for _, tag_label, at_coords, at_yaw in at_detections:         # <── desempacar 4
-                self._publish_detection(
-                    'ar_code', tag_label, 1.0, at_coords,
-                    yaw_deg=at_yaw,                                        # <── NUEVO
-                    header=header,
+            if run_at:
+                annotated_at = small.copy()
+                annotated_at, at_detections = self._process_apriltag(
+                    annotated_at, scale_x, scale_y
                 )
+                for _, tag_label, at_coords, at_yaw in at_detections:
+                    self._publish_detection(
+                        'ar_code', tag_label, 1.0, at_coords,
+                        yaw_deg=at_yaw,
+                        header=header,
+                    )
 
-            with self.lock:
-                self.last_annotated = annotated
-
+                self._publish_annotated(self._pub_annotated_at, annotated_at, header)
+                with self.lock:
+                    self.last_annotated_at = annotated_at
 
 # ── Punto de entrada ──────────────────────────────────────────────────────────
 
 def main(args=None):
     rclpy.init(args=args)
-    node = DetectorNode()
+    node = MazeNode()
     try:
         rclpy.spin(node)
     finally:

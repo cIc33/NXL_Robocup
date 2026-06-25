@@ -1,11 +1,11 @@
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Int8MultiArray, Float32MultiArray
+from std_msgs.msg import Float32MultiArray, Int32
 from sensor_msgs.msg import JointState
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 import serial
 import time
-import math  # <-- AÑADIDO PARA LA CONVERSIÓN A RADIANES
+import math 
 
 # ==============================
 # FUNCIONES AUXILIARES MODBUS RTU
@@ -40,8 +40,8 @@ class ControlTest(Node):
         )
 
         # === PUBLISHERS ORIGINALES DEL ARDUINO ===
-        self.pub_piper = self.create_publisher(Int8MultiArray, '/piper/velocity_cmd', qos_cmds)
-        self.pub_piper_mode = self.create_publisher(Int8MultiArray, '/piper/switch_mode', qos_cmds)
+        self.pub_piper = self.create_publisher(Float32MultiArray, '/piper/test_velocity_cmd', qos_cmds)
+        self.pub_piper_mode = self.create_publisher(Int32, '/piper/switch_mode', qos_cmds)
         self.pub_flip_encoders = self.create_publisher(Float32MultiArray, '/flipper_encoders', qos_cmds)
 
         # === PUBLISHERS PARA LOS ENCODERS RS485 ===
@@ -62,7 +62,15 @@ class ControlTest(Node):
         self.send_interval = 0.05  # Envío continuo a 20Hz
         self.last_send_time = 0.0
 
+        # === MAPEO DE switch_mode ===
+        # El Arduino manda -100 o 100 en el último campo de la trama ARM8.
+        # Se traduce a un valor binario simple para /piper/switch_mode
+        self.switch_mode_map = {100: 0, -100: 1}
+        self._last_switch_mode = 0  # valor por defecto / último válido conocido
+
         # === CONEXIÓN ORIGINAL: ARDUINO MEGA PRO ===
+        # FIX: este puerto estaba duplicado con el de RS485 (ambos en ttyUSB1).
+        # Se restaura a ttyUSB0 -- confirma que sea la asignación física correcta.
         try:
             self.ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=0.1)
             self.ser.reset_input_buffer()
@@ -72,16 +80,19 @@ class ControlTest(Node):
             self.get_logger().error(f"Error crítico: No se pudo abrir el puerto serial: {e}")
             raise e
         
-        # === NUEVA CONEXIÓN: RS485 MODBUS ===
+        # === CONEXIÓN RS485 MODBUS ===
+        self.ser_rs485 = None
+        self.rs485_connected = False  # Bandera para saber si el puerto está listo
+
         try:
-            self.ser_rs485 = serial.Serial('/dev/ttyUSB1', 9600, timeout=0.05)
+            self.ser_rs485 = serial.Serial('/dev/ttyUSB2', 9600, timeout=0.05)
             self.ser_rs485.reset_input_buffer()
             self.ser_rs485.reset_output_buffer()
-            self.get_logger().info("Encoders Modbus conectados en /dev/ttyUSB1 a 9600 baudios")
+            self.rs485_connected = True
+            self.get_logger().info("Encoders Modbus conectados en /dev/ttyUSB2 a 9600 baudios")
         except Exception as e:
-            self.get_logger().error(f"Error crítico: No se pudo abrir el puerto serial 485: {e}")
-            raise e
-
+            # Quitamos el 'raise e' para que el nodo NO muera si no detecta el USB1
+            self.get_logger().warn(f"¡Atención! No se pudo abrir el puerto RS485 (/dev/ttyUSB1): {e}. El nodo continuará sin encoders.")
         # Variables y timers
         self.serial_buffer = ""
         self.encoder_ids = [3, 5]
@@ -113,7 +124,7 @@ class ControlTest(Node):
 
                 if line.startswith("DRV:"):
                     self.procesar_drv(line)
-                elif line.startswith("ARM:"):
+                elif line.startswith("ARM8:"):
                     self.procesar_piper(line)
                 else:
                     self.get_logger().warn(f"Línea desconocida: {line}")
@@ -151,24 +162,35 @@ class ControlTest(Node):
 
     def procesar_piper(self, line):
         try:
-            parts = line.replace("ARM:", "").split(',')
+            parts = line.replace("ARM8:", "").split(',')
 
             if len(parts) != 8:
                 self.get_logger().warn(f"ARM inválido: {parts}")
                 return
 
             raw_values = [int(val.strip()) for val in parts]
-            brazo = [int(val / 10.0) for val in raw_values[:7]]
-            switch_mode = raw_values[7]
 
-            self.get_logger().info(f"BRAZO={brazo} MODE={switch_mode}")
+            # Brazo y gripper se publican TAL CUAL llegan, sin escalar (rango -100 a 100)
+            brazo = raw_values[:7]
 
-            msg_brazo = Int8MultiArray()
-            msg_brazo.data = brazo
+            # === MAPEO switch_mode: 100 -> 0, -100 -> 1 ===
+            raw_switch = raw_values[7]
+            if raw_switch in self.switch_mode_map:
+                switch_mode = self.switch_mode_map[raw_switch]
+                self._last_switch_mode = switch_mode
+            else:
+                self.get_logger().warn(
+                    f"switch_mode inesperado: {raw_switch} (se esperaba 100 o -100); "
+                    f"se mantiene último valor válido: {self._last_switch_mode}"
+                )
+                switch_mode = self._last_switch_mode
+
+            msg_brazo = Float32MultiArray()
+            msg_brazo.data = [float(v) for v in brazo]
             self.pub_piper.publish(msg_brazo)
 
-            msg_mode = Int8MultiArray()
-            msg_mode.data = [switch_mode]
+            msg_mode = Int32()
+            msg_mode.data = switch_mode
             self.pub_piper_mode.publish(msg_mode)
             
             msg_encoders = Float32MultiArray()
@@ -184,51 +206,47 @@ class ControlTest(Node):
     # LÓGICA AISLADA: ENCODERS ABSOLUTOS MODBUS
     # ========================================================
     def timer_modbus_callback(self):
-        angles = []
-        
-        for enc_id in self.encoder_ids:
-            pos, angle, status = self.interrogar_encoder(enc_id)
+        # Si el puerto serial no se pudo abrir al inicio, saltamos la lectura Modbus
+        # pero dejamos que siga abajo para publicar el último JointState válido.
+        if self.rs485_connected and self.ser_rs485 is not None:
+            angles = []
             
-            if status == "OK":
-                angles.append(angle)
-            else:
-                self.get_logger().warn(f"RS485 ID {enc_id}: Error {status}")
-                angles.append(-1.0) 
-            
-            time.sleep(0.01)
-            
-        if len(angles) == 2 and angles[0] != -1.0 and angles[1] != -1.0:
-            
-            # ==========================================
-            # APLICACIÓN DE OFFSETS (Cero Absoluto)
-            # ==========================================
-            angles[0] = 360.0 - angles[0]
-            offset_enc1 = -215.5078125  
-            offset_enc2 = 109.3359375  
-            
-            angulo_corregido_1 = (angles[0] - offset_enc1) % 360.0
-            angulo_corregido_2 = (angles[1] - offset_enc2) % 360.0
+            for enc_id in self.encoder_ids:
+                pos, angle, status = self.interrogar_encoder(enc_id)
+                
+                if status == "OK":
+                    angles.append(angle)
+                else:
+                    self.get_logger().warn(f"RS485 ID {enc_id}: Error {status}")
+                    angles.append(-1.0) 
+                
+                time.sleep(0.01)
+                
+            if len(angles) == 2 and angles[0] != -1.0 and angles[1] != -1.0:
+                # ==========================================
+                # APLICACIÓN DE OFFSETS (Cero Absoluto)
+                # ==========================================
+                angles[0] = 360.0 - angles[0]
+                offset_enc1 = -215.5078125  
+                offset_enc2 = 109.3359375  
+                
+                angulo_corregido_1 = (angles[0] - offset_enc1) % 360.0
+                angulo_corregido_2 = (angles[1] - offset_enc2) % 360.0
 
-            msg = Float32MultiArray()
-            msg.data = [angulo_corregido_1, angulo_corregido_2]
-            self.pub_abs_encoders.publish(msg)
+                msg = Float32MultiArray()
+                msg.data = [angulo_corregido_1, angulo_corregido_2]
+                self.pub_abs_encoders.publish(msg)
 
-            # ==========================================
-            # AÑADIDO: CONVERSIÓN A RADIANES PARA RVIZ
-            # ==========================================
-            # Como los grados ya están corregidos al cero arriba,
-            # la conversión matemática es directa y limpia.
-            rad_R = math.radians(angulo_corregido_1)
-            rad_L = math.radians(angulo_corregido_2)
+                # Convertir a radianes para RViz
+                rad_R = math.radians(angulo_corregido_1)
+                rad_L = math.radians(angulo_corregido_2)
 
-            # Normalizar para que vaya de -π a π (estándar de ROS para joints continuos)
-            rad_R = (rad_R + math.pi) % (2 * math.pi) - math.pi
-            rad_L = (rad_L + math.pi) % (2 * math.pi) - math.pi
+                rad_R = (rad_R + math.pi) % (2 * math.pi) - math.pi
+                rad_L = (rad_L + math.pi) % (2 * math.pi) - math.pi
 
-            # Guardamos los valores en memoria por si hay error en la siguiente lectura
-            self._last_valid_rad = [rad_R, rad_L]
+                self._last_valid_rad = [rad_R, rad_L]
 
-        # Publicar JointState siempre (para que RViz no pierda la articulación si hay un micro-corte)
+        # Esto se ejecuta SIEMPRE. Si no hay USB1, publicará [0.0, 0.0] (o los últimos radianes que haya guardado)
         self._publicar_joint_state()
 
     def _publicar_joint_state(self):
@@ -280,7 +298,8 @@ def main(args=None):
         if hasattr(node, 'ser') and node.ser.is_open:
             node.ser.write(b"0,0\n")
             node.ser.close()
-        if hasattr(node, 'ser_rs485') and node.ser_rs485.is_open:
+        # Solo cerramos el RS485 si la bandera fue True y el objeto existe
+        if hasattr(node, 'ser_rs485') and node.ser_rs485 is not None and node.ser_rs485.is_open:
             node.ser_rs485.close()
         node.destroy_node()
         rclpy.shutdown()

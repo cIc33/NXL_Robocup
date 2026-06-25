@@ -26,6 +26,7 @@ setup(
             'piper_joint_state_normalizer = piper_hardware_bridge.joint_state_normalizer:main',
             'piper_hardware_velocity_bridge = piper_hardware_bridge.hardware_velocity_bridge:main',
             'piper_follow_joint_trajectory_bridge = piper_hardware_bridge.follow_joint_trajectory_bridge:main',
+            'piper_joint_state_reader = piper_hardware_bridge.joint_state_reader:main',
         ],
     },
 )
