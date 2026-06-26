@@ -28,7 +28,8 @@ setup(
             'vision = nixito_perception.vision:main',
             'vision_maze = nixito_perception.vision_maze:main',
             'gopro = nixito_perception.gopro:main',
-            'thermal = nixito_perception.thermal_topdon:main'
+            'thermal = nixito_perception.thermal_topdon:main',
+            'paro = nixito_perception.centro_paro:main'
         ],
     },
 )
