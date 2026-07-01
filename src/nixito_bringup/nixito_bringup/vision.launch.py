@@ -4,12 +4,66 @@ from launch_ros.actions import Node, LifecycleNode
 from launch_ros.events.lifecycle import ChangeState
 from launch.event_handlers import OnProcessIO, OnProcessExit
 from lifecycle_msgs.msg import Transition
+import glob
+import os
+import subprocess
+
+
+def get_video_device(vendor_id="1bcf", product_id="2284"):
+    """Busca el /dev/videoX de captura (no metadata) de la cámara UGREEN 2K."""
+
+    by_id_path = "/dev/v4l/by-id/"
+    if os.path.isdir(by_id_path):
+        for entry in sorted(os.listdir(by_id_path)):
+            if "index0" not in entry:
+                continue
+            if "sunplus" in entry.lower() or "ugreen" in entry.lower():
+                real_dev = os.path.realpath(os.path.join(by_id_path, entry))
+                print(f"[get_video_device] Encontrado via by-id: {real_dev}")
+                return real_dev
+
+    print("[get_video_device] by-id no funcionó, probando fallback...")
+
+    udevadm_bin = "/usr/bin/udevadm" if os.path.exists("/usr/bin/udevadm") else "udevadm"
+    v4l2ctl_bin = "/usr/bin/v4l2-ctl" if os.path.exists("/usr/bin/v4l2-ctl") else "v4l2-ctl"
+
+    for dev in sorted(glob.glob("/dev/video*")):
+        try:
+            info = subprocess.run(
+                [udevadm_bin, "info", "--query=property", f"--name={dev}"],
+                capture_output=True, text=True, check=True
+            ).stdout
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+
+        if f"ID_VENDOR_ID={vendor_id}" not in info or f"ID_MODEL_ID={product_id}" not in info:
+            continue
+
+        try:
+            caps = subprocess.run(
+                [v4l2ctl_bin, "-d", dev, "--all"],
+                capture_output=True, text=True, check=True
+            ).stdout
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+
+        if "Video Capture" in caps and "Metadata Capture" not in caps:
+            print(f"[get_video_device] Encontrado via fallback: {dev}")
+            return dev
+
+    raise RuntimeError(f"No se encontró la cámara {vendor_id}:{product_id}")
 
 
 def generate_launch_description():
-    restart_gopro = ExecuteProcess(
-        cmd=['curl', '-s', 'http://172.23.197.51:8080/gp/gpWebcam/STOP'],
-        output='screen'
+    cam_principal = Node(
+        package='usb_cam',
+        executable="usb_cam_node_exe",
+        name="usb_cam",
+        namespace='principal',
+        output='screen',
+        parameters=[{
+            'video_device': get_video_device(),
+        }]
     )
 
     realsense = ExecuteProcess(
@@ -19,17 +73,6 @@ def generate_launch_description():
             'rgb_camera.color_profile:=640x480x30',
         ],
         cwd='/home/angel',
-        output='screen'
-    )
-
-    gopro = ExecuteProcess(
-        cmd=['sudo', './gopro', 'webcam', '-a', '-n', '-r', '480', '-i', '172.23.197.51'],
-        cwd='/home/angel/NXL_Robocup/src/nixito_perception/drivers/gopro_as_webcam_on_linux',
-        output='screen'
-    )
-
-    ffplay = ExecuteProcess(
-        cmd=['ffplay', '/dev/video42'],
         output='screen'
     )
 
@@ -81,42 +124,8 @@ def generate_launch_description():
         }]
     )
 
-    # ── Esperar a que el curl STOP termine antes de arrancar el gopro ──
-    lanzar_gopro_tras_stop = RegisterEventHandler(
-        OnProcessExit(
-            target_action=restart_gopro,
-            on_exit=[gopro],
-        )
-    )
-
-    # ── Esperar a que ffmpeg confirme que está escribiendo al device ───
-    ffplay_launched = [False]
-
-    def check_video_ready(event):
-        if ffplay_launched[0]:
-            return []
-        try:
-            text = event.text.decode(errors='ignore')
-        except Exception:
-            return []
-        # Esta línea aparece en stderr de ffmpeg justo cuando empieza
-        # a escribir frames a /dev/video42
-        if 'video4linux2' in text:
-            ffplay_launched[0] = True
-            return [ffplay]
-        return []
-
-    esperar_video = RegisterEventHandler(
-        OnProcessIO(
-            target_action=gopro,
-            on_stderr=check_video_ready
-        )
-    )
-
     return LaunchDescription([
-        restart_gopro,
-        lanzar_gopro_tras_stop,
-        esperar_video,
+        cam_principal,
         realsense,
         thermal_camera,
         foxglove,
