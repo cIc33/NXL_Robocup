@@ -92,25 +92,9 @@ def generate_launch_description():
         namespace='',
         output='screen'
     )
-
-    vision_maze = LifecycleNode(
-        package='nixito_perception',
-        executable='vision_maze',
-        name='vision_maze',
-        namespace='maze',
-        output='screen'
-    )
-
     configure_vision = EmitEvent(
         event=ChangeState(
             lifecycle_node_matcher=lambda action: action == vision_node,
-            transition_id=Transition.TRANSITION_CONFIGURE,
-        )
-    )
-
-    configure_maze = EmitEvent(
-        event=ChangeState(
-            lifecycle_node_matcher=lambda action: action == vision_maze,
             transition_id=Transition.TRANSITION_CONFIGURE,
         )
     )
@@ -131,7 +115,5 @@ def generate_launch_description():
         thermal_camera,
         foxglove,
         vision_node,
-        vision_maze,
         configure_vision,
-        configure_maze,
     ])
