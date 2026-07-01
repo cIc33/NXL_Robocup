@@ -70,8 +70,12 @@ def generate_launch_description():
     realsense = ExecuteProcess(
         cmd=[
             'ros2', 'launch', 'realsense2_camera', 'rs_launch.py',
-            'align_depth.enable:=true',
+            'enable_depth:=false',
+            'enable_infra1:=false',
+            'enable_infra2:=false',
+            'align_depth.enable:=false',   # ya no aplica sin depth, pero por las dudas
             'rgb_camera.color_profile:=640x480x30',
+            'enable_color:=true',
         ],
         cwd='/home/angel',
         output='screen'
