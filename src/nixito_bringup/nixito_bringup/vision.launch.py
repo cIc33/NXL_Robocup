@@ -9,63 +9,8 @@ import os
 import subprocess
 
 
-def get_video_device(vendor_id="1bcf", product_id="2284"):
-    """Busca el /dev/videoX de captura (no metadata) de la cámara UGREEN 2K."""
-
-    by_id_path = "/dev/v4l/by-id/"
-    if os.path.isdir(by_id_path):
-        for entry in sorted(os.listdir(by_id_path)):
-            if "index0" not in entry:
-                continue
-            if "sunplus" in entry.lower() or "ugreen" in entry.lower():
-                real_dev = os.path.realpath(os.path.join(by_id_path, entry))
-                print(f"[get_video_device] Encontrado via by-id: {real_dev}")
-                return real_dev
-
-    print("[get_video_device] by-id no funcionó, probando fallback...")
-
-    udevadm_bin = "/usr/bin/udevadm" if os.path.exists("/usr/bin/udevadm") else "udevadm"
-    v4l2ctl_bin = "/usr/bin/v4l2-ctl" if os.path.exists("/usr/bin/v4l2-ctl") else "v4l2-ctl"
-
-    for dev in sorted(glob.glob("/dev/video*")):
-        try:
-            info = subprocess.run(
-                [udevadm_bin, "info", "--query=property", f"--name={dev}"],
-                capture_output=True, text=True, check=True
-            ).stdout
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            continue
-
-        if f"ID_VENDOR_ID={vendor_id}" not in info or f"ID_MODEL_ID={product_id}" not in info:
-            continue
-
-        try:
-            caps = subprocess.run(
-                [v4l2ctl_bin, "-d", dev, "--all"],
-                capture_output=True, text=True, check=True
-            ).stdout
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            continue
-
-        if "Video Capture" in caps and "Metadata Capture" not in caps:
-            print(f"[get_video_device] Encontrado via fallback: {dev}")
-            return dev
-
-    raise RuntimeError(f"No se encontró la cámara {vendor_id}:{product_id}")
-
 
 def generate_launch_description():
-    cam_principal = Node(
-        package='usb_cam',
-        executable="usb_cam_node_exe",
-        name="usb_cam",
-        namespace='principal',
-        output='screen',
-        parameters=[{
-            'video_device': get_video_device(),
-            'pixel_format': 'mjpeg2rgb',   # o 'yuyv' si tu cámara lo soporta bien
-        }]
-    )
 
     realsense = ExecuteProcess(
         cmd=[
@@ -126,7 +71,6 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        cam_principal,
         realsense,
         thermal_camera,
         foxglove,

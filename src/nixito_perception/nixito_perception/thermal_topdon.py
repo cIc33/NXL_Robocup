@@ -123,10 +123,11 @@ class TC001ThermalNode(Node):
         bgr = cv2.cvtColor(imdata, cv2.COLOR_YUV2BGR_YUYV)
         bgr = cv2.resize(bgr, (self.new_width, self.new_height), interpolation=cv2.INTER_CUBIC)
         heatmap = cv2.applyColorMap(bgr, cv2.COLORMAP_INFERNO)
+        heatmap = cv2.rotate(heatmap, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-        cx = self.new_width // 2
-        cy = self.new_height // 2
 
+        cx = heatmap.shape[1] // 2   # ← usar shape en vez de new_width/new_height
+        cy = heatmap.shape[0] // 2
         # --- Cruz central ---
         cv2.line(heatmap, (cx, cy + 20), (cx, cy - 20), (255, 255, 255), 2)
         cv2.line(heatmap, (cx + 20, cy), (cx - 20, cy), (255, 255, 255), 2)

@@ -1,18 +1,7 @@
-"""
-vision_app.py
-=============
-Aplicación de escritorio (ventana emergente) para probar los distintos
-modos de visión (YOLO, QR, Detección de movimiento) usando una cámara
-Intel RealSense a través de pyrealsense2.
 
-Se elimina toda dependencia de ROS2 / rclpy: la app corre de forma
-standalone con una interfaz Tkinter que muestra el video en vivo y
-tiene un botón por cada modo de visión.
 
-Dependencias (instalar con pip):
-    pip install pyrealsense2 opencv-python pillow numpy ultralytics
-"""
-
+import glob
+import os
 import threading
 import time
 import tkinter as tk
@@ -51,12 +40,52 @@ CAM_WIDTH  = 640
 CAM_HEIGHT = 480
 CAM_FPS    = 30
 
+# ── Cámara térmica TC001 ──────────────────────────────────────────────────────
+TC001_VENDOR_ID  = '0bda'
+TC001_PRODUCT_ID = '5830'
+TC001_WIDTH      = 256
+TC001_HEIGHT     = 192
+TC001_SCALE      = 3
+TC001_THRESHOLD  = 2   # °C sobre/bajo el promedio para marcar puntos caliente/frío
+
 # ── GUI ───────────────────────────────────────────────────────────────────────
 GUI_REFRESH_MS = 15   # periodo del bucle de actualización de la ventana
 
 
 # ===========================================================================
-# Captura de cámara (pyrealsense2) en un hilo aparte
+# Utilidades TC001
+# ===========================================================================
+
+def find_tc001_device():
+    """
+    Busca el dispositivo /dev/videoX de la cámara Topdon TC001
+    comparando Vendor ID (0x0bda) y Product ID (0x5830) en sysfs.
+    Retorna la ruta del dispositivo o None si no se encuentra.
+    """
+    for video_path in sorted(glob.glob('/sys/class/video4linux/video*')):
+        try:
+            real_path = os.path.realpath(video_path)
+            parts = real_path.split('/')
+            for i in range(len(parts), 0, -1):
+                parent = '/'.join(parts[:i])
+                vendor_file = os.path.join(parent, 'idVendor')
+                product_file = os.path.join(parent, 'idProduct')
+                if os.path.exists(vendor_file) and os.path.exists(product_file):
+                    with open(vendor_file) as vf, open(product_file) as pf:
+                        vendor = vf.read().strip()
+                        product = pf.read().strip()
+                    if vendor == TC001_VENDOR_ID and product == TC001_PRODUCT_ID:
+                        dev_name = os.path.basename(video_path)
+                        return f'/dev/{dev_name}'
+                    break
+        except (OSError, PermissionError):
+            continue
+
+    return None
+
+
+# ===========================================================================
+# Captura de cámara RealSense (pyrealsense2) en un hilo aparte
 # ===========================================================================
 
 class RealSenseCamera:
@@ -107,6 +136,141 @@ class RealSenseCamera:
 
 
 # ===========================================================================
+# Captura + procesamiento de cámara térmica TC001 en un hilo aparte
+# ===========================================================================
+
+class ThermalCamera:
+    """
+    Hilo dedicado a leer frames crudos de la Topdon TC001 y convertirlos
+    directamente en el mapa de calor (heatmap) ya anotado con
+    temperatura central, máxima y mínima — listo para mostrar en la GUI.
+    """
+
+    def __init__(self, device_path=None, width=TC001_WIDTH, height=TC001_HEIGHT,
+                 scale=TC001_SCALE):
+        self.width      = width
+        self.height     = height
+        self.scale      = scale
+        self.new_width  = width * scale
+        self.new_height = height * scale
+
+        self._device_path = device_path or find_tc001_device()
+        if self._device_path is None:
+            raise RuntimeError(
+                "No se encontró la cámara TC001. Verifica que esté conectada."
+            )
+
+        self._cap = cv2.VideoCapture(self._device_path, cv2.CAP_V4L)
+        self._cap.set(cv2.CAP_PROP_CONVERT_RGB, 0.0)
+        if not self._cap.isOpened():
+            raise RuntimeError(f"No se pudo abrir la cámara TC001 en {self._device_path}")
+
+        self._latest_frame = None
+        self._lock          = threading.Lock()
+        self._running       = False
+        self._thread         = None
+
+    def start(self) -> None:
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
+        while self._running:
+            ret, frame = self._cap.read()
+            if not ret:
+                continue
+            heatmap = self._process(frame)
+            with self._lock:
+                self._latest_frame = heatmap
+
+    def _process(self, frame: np.ndarray) -> np.ndarray:
+        # Separar imagen visible y datos de temperatura
+        imdata, thdata = np.array_split(frame, 2)
+
+        # --- Temperatura del centro ---
+        hi = thdata[96][128][0]
+        lo = thdata[96][128][1]
+        rawtemp = hi + (lo * 256)
+        center_temp = round((rawtemp / 64) - 273.15, 2)
+
+        # --- Temperatura máxima ---
+        lomax = thdata[..., 1].max()
+        posmax = thdata[..., 1].argmax()
+        mcol, mrow = divmod(posmax, self.width)
+        himax = thdata[mcol][mrow][0]
+        maxtemp = round(((himax + lomax * 256) / 64) - 273.15, 2)
+
+        # --- Temperatura mínima ---
+        lomin = thdata[..., 1].min()
+        posmin = thdata[..., 1].argmin()
+        lcol, lrow = divmod(posmin, self.width)
+        himin = thdata[lcol][lrow][0]
+        mintemp = round(((himin + lomin * 256) / 64) - 273.15, 2)
+
+        # --- Temperatura promedio ---
+        loavg = thdata[..., 1].mean()
+        hiavg = thdata[..., 0].mean()
+        avgtemp = round(((loavg * 256 + hiavg) / 64) - 273.15, 2)
+
+        # --- Procesar imagen visual ---
+        bgr = cv2.cvtColor(imdata, cv2.COLOR_YUV2BGR_YUYV)
+        bgr = cv2.resize(bgr, (self.new_width, self.new_height), interpolation=cv2.INTER_CUBIC)
+        heatmap = cv2.applyColorMap(bgr, cv2.COLORMAP_INFERNO)
+        heatmap = cv2.rotate(heatmap, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        cx = heatmap.shape[1] // 2   # ← usar shape en vez de new_width/new_height
+        cy = heatmap.shape[0] // 2
+
+        # --- Cruz central ---
+        cv2.line(heatmap, (cx, cy + 20), (cx, cy - 20), (255, 255, 255), 2)
+        cv2.line(heatmap, (cx + 20, cy), (cx - 20, cy), (255, 255, 255), 2)
+        cv2.line(heatmap, (cx, cy + 20), (cx, cy - 20), (0, 0, 0), 1)
+        cv2.line(heatmap, (cx + 20, cy), (cx - 20, cy), (0, 0, 0), 1)
+
+        # Temperatura centro
+        cv2.putText(heatmap, f'{center_temp} C', (cx + 10, cy - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 2, cv2.LINE_AA)
+        cv2.putText(heatmap, f'{center_temp} C', (cx + 10, cy - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+
+        # --- Punto más caliente ---
+        if maxtemp > avgtemp + TC001_THRESHOLD:
+            px, py = mrow * self.scale, mcol * self.scale
+            cv2.circle(heatmap, (px, py), 5, (0, 0, 0), 2)
+            cv2.circle(heatmap, (px, py), 5, (0, 0, 255), -1)
+            cv2.putText(heatmap, f'{maxtemp} C', (px + 10, py + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 2, cv2.LINE_AA)
+            cv2.putText(heatmap, f'{maxtemp} C', (px + 10, py + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+
+        # --- Punto más frío ---
+        if mintemp < avgtemp - TC001_THRESHOLD:
+            px, py = lrow * self.scale, lcol * self.scale
+            cv2.circle(heatmap, (px, py), 5, (0, 0, 0), 2)
+            cv2.circle(heatmap, (px, py), 5, (255, 0, 0), -1)
+            cv2.putText(heatmap, f'{mintemp} C', (px + 10, py + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 2, cv2.LINE_AA)
+            cv2.putText(heatmap, f'{mintemp} C', (px + 10, py + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+
+        return heatmap
+
+    def get_latest_frame(self):
+        with self._lock:
+            return None if self._latest_frame is None else self._latest_frame.copy()
+
+    def stop(self) -> None:
+        self._running = False
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+        try:
+            self._cap.release()
+        except Exception:
+            pass
+
+
+# ===========================================================================
 # Aplicación principal
 # ===========================================================================
 
@@ -117,7 +281,7 @@ class VisionApp:
         self.root.title("Nixito — Visión")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # ── Estado de modelos / modo activo ─────────────────────────────────
+        # ── Estado de modelos / modo activo (solo aplica a RealSense) ───────
         self.active_mode: str | None = None   # "yolo" | "qr" | "movement" | None
 
         self.model        = None
@@ -134,9 +298,19 @@ class VisionApp:
         self._qr_last_value = ""
         self._qr_last_pts   = None
 
-        # ── Cámara ───────────────────────────────────────────────────────────
+        # ── Cámara RealSense ─────────────────────────────────────────────────
         self.camera = RealSenseCamera()
         self.camera.start()
+
+        # ── Cámara térmica TC001 (opcional: si no está conectada, seguimos) ─
+        self.thermal_camera = None
+        self._thermal_error = ""
+        try:
+            self.thermal_camera = ThermalCamera()
+            self.thermal_camera.start()
+        except RuntimeError as e:
+            self._thermal_error = str(e)
+            print(f"[TC001] {e} — el panel térmico quedará vacío.")
 
         # ── Construcción de la interfaz ────────────────────────────────────
         self._build_ui()
@@ -149,12 +323,30 @@ class VisionApp:
     # -----------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        video_frame = ttk.Frame(self.root)
-        video_frame.pack(padx=8, pady=8)
+        # ── Contenedor con ambos videos, uno al lado del otro ───────────────
+        videos_frame = ttk.Frame(self.root)
+        videos_frame.pack(padx=8, pady=8)
 
-        self.video_label = ttk.Label(video_frame)
+        rs_frame = ttk.LabelFrame(videos_frame, text="RealSense")
+        rs_frame.grid(row=0, column=0, padx=(0, 8))
+        self.video_label = ttk.Label(rs_frame)
         self.video_label.pack()
 
+        thermal_frame = ttk.LabelFrame(videos_frame, text="TC001 (térmica)")
+        thermal_frame.grid(row=0, column=1)
+        self.thermal_label = ttk.Label(thermal_frame)
+        self.thermal_label.pack()
+
+        if self.thermal_camera is None:
+            # Placeholder visible mientras no haya cámara térmica conectada
+            self.thermal_label.configure(
+                text=f"TC001 no disponible\n{self._thermal_error}",
+                anchor="center",
+                justify="center",
+                width=40,
+            )
+
+        # ── Controles (solo afectan al modo de la RealSense) ────────────────
         controls = ttk.Frame(self.root)
         controls.pack(pady=(0, 8))
 
@@ -171,7 +363,7 @@ class VisionApp:
         ttk.Label(self.root, textvariable=self.status_var).pack(pady=(0, 8))
 
     # -----------------------------------------------------------------------
-    # Gestión de modos / modelos
+    # Gestión de modos / modelos (RealSense)
     # -----------------------------------------------------------------------
 
     def _set_mode(self, mode: str | None) -> None:
@@ -222,6 +414,7 @@ class VisionApp:
     # -----------------------------------------------------------------------
 
     def _update_frame(self) -> None:
+        # ── RealSense (con el modo de visión seleccionado) ──────────────────
         frame = self.camera.get_latest_frame()
         if frame is not None:
             if self.active_mode == "yolo" and self.model_loaded:
@@ -231,16 +424,22 @@ class VisionApp:
             elif self.active_mode == "movement":
                 frame = self._process_movement(frame)
 
-            self._display_frame(frame)
+            self._display_frame(self.video_label, frame)
+
+        # ── TC001 (heatmap ya viene procesado desde el hilo de captura) ─────
+        if self.thermal_camera is not None:
+            thermal_frame = self.thermal_camera.get_latest_frame()
+            if thermal_frame is not None:
+                self._display_frame(self.thermal_label, thermal_frame)
 
         self.root.after(GUI_REFRESH_MS, self._update_frame)
 
-    def _display_frame(self, frame: np.ndarray) -> None:
+    def _display_frame(self, label: ttk.Label, frame: np.ndarray) -> None:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(rgb)
         imgtk = ImageTk.PhotoImage(image=img)
-        self.video_label.imgtk = imgtk   # evita que el GC borre la imagen
-        self.video_label.configure(image=imgtk)
+        label.imgtk = imgtk   # evita que el GC borre la imagen
+        label.configure(image=imgtk)
 
     # -----------------------------------------------------------------------
     # Pipeline YOLO
@@ -387,6 +586,8 @@ class VisionApp:
     def _on_close(self) -> None:
         self._unload_models()
         self.camera.stop()
+        if self.thermal_camera is not None:
+            self.thermal_camera.stop()
         self.root.destroy()
 
 
