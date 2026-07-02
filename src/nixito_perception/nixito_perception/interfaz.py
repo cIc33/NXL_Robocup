@@ -1,5 +1,3 @@
-
-
 import glob
 import os
 import threading
@@ -49,7 +47,12 @@ TC001_SCALE      = 3
 TC001_THRESHOLD  = 2   # °C sobre/bajo el promedio para marcar puntos caliente/frío
 
 # ── GUI ───────────────────────────────────────────────────────────────────────
-GUI_REFRESH_MS = 15   # periodo del bucle de actualización de la ventana
+GUI_REFRESH_MS   = 15    # periodo del bucle de actualización de la ventana
+OUTER_PAD        = 16    # margen exterior de la ventana
+INNER_PAD        = 16    # separación entre el panel RealSense y el térmico
+CONTROLS_HEIGHT  = 110   # alto reservado para la barra de botones
+STATUS_HEIGHT    = 36    # alto reservado para la etiqueta de estado
+LABELFRAME_CHROME = 40   # alto aproximado que añade el título del LabelFrame
 
 
 # ===========================================================================
@@ -280,6 +283,29 @@ class VisionApp:
         self.root = root
         self.root.title("Nixito — Visión")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.configure(bg="#1e1e1e")
+
+        # ── Ventana redimensionable con el ratón (arrastrar bordes/esquinas) ─
+        self.root.resizable(True, True)
+        self.root.minsize(640, 480)
+        # (a diferencia de -fullscreen, esto conserva los botones de
+        # minimizar/maximizar/cerrar de la ventana)
+        try:
+            self.root.state("zoomed")          # Windows / algunos WMs de Linux
+        except tk.TclError:
+            try:
+                self.root.attributes("-zoomed", True)   # X11 (Linux)
+            except tk.TclError:
+                # Último recurso: ajustar geometría al tamaño de pantalla
+                self.root.geometry(
+                    f"{self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}+0+0"
+                )
+
+        # F11 sigue disponible por si en algún momento se quiere fullscreen
+        # real sin bordes; Escape lo desactiva.
+        self._is_fullscreen = False
+        self.root.bind("<F11>", self._toggle_fullscreen)
+        self.root.bind("<Escape>", lambda e: self.root.attributes("-fullscreen", False))
 
         # ── Estado de modelos / modo activo (solo aplica a RealSense) ───────
         self.active_mode: str | None = None   # "yolo" | "qr" | "movement" | None
@@ -312,29 +338,123 @@ class VisionApp:
             self._thermal_error = str(e)
             print(f"[TC001] {e} — el panel térmico quedará vacío.")
 
+        # ── Calcular tamaños de los paneles según la resolución de pantalla ──
+        self._compute_panel_sizes()
+
         # ── Construcción de la interfaz ────────────────────────────────────
         self._build_ui()
 
+        # ── Reaccionar cuando el usuario cambia el tamaño de la ventana
+        #    (p. ej. al restaurarla tras minimizarla, o arrastrando el borde)
+        self._resize_after_id = None
+        self.root.bind("<Configure>", self._on_root_configure)
+
         # ── Arranca el bucle de refresco ────────────────────────────────────
         self.root.after(GUI_REFRESH_MS, self._update_frame)
+
+    # -----------------------------------------------------------------------
+    # Redimensionado de ventana (arrastrar borde, restaurar tras minimizar…)
+    # -----------------------------------------------------------------------
+
+    def _on_root_configure(self, event) -> None:
+        # <Configure> se dispara también por cada widget hijo; nos interesa
+        # solo cuando cambia el tamaño de la ventana principal.
+        if event.widget is not self.root:
+            return
+
+        # "Debounce": esperamos a que el usuario deje de arrastrar el borde
+        # antes de recalcular, para no recargar la CPU en cada píxel movido.
+        if self._resize_after_id is not None:
+            self.root.after_cancel(self._resize_after_id)
+        self._resize_after_id = self.root.after(200, self._apply_new_panel_sizes)
+
+    def _apply_new_panel_sizes(self) -> None:
+        self._resize_after_id = None
+        old_rs, old_th = self.rs_display_size, self.thermal_display_size
+        self._compute_panel_sizes()
+        if self.rs_display_size == old_rs and self.thermal_display_size == old_th:
+            return   # nada cambió realmente, evitamos redibujar sin motivo
+
+        if self.thermal_camera is None:
+            thermal_w, _ = self.thermal_display_size
+            self.thermal_label.configure(width=thermal_w)
+
+    # -----------------------------------------------------------------------
+    # Fullscreen opcional (F11) — la ventana arranca maximizada, no fullscreen
+    # -----------------------------------------------------------------------
+
+    def _toggle_fullscreen(self, event=None) -> None:
+        self._is_fullscreen = not self._is_fullscreen
+        self.root.attributes("-fullscreen", self._is_fullscreen)
+
+    # -----------------------------------------------------------------------
+    # Cálculo de tamaños (RealSense grande + térmica con el ancho restante)
+    # -----------------------------------------------------------------------
+
+    def _compute_panel_sizes(self) -> None:
+        self.root.update_idletasks()
+        # Usamos el tamaño real de la ventana ya maximizada (más fiable que
+        # winfo_screenwidth/height, que ignora la barra de título / taskbar).
+        screen_w = self.root.winfo_width()
+        screen_h = self.root.winfo_height()
+        if screen_w <= 1 or screen_h <= 1:
+            # La ventana aún no se ha dibujado del todo: usamos el tamaño
+            # de pantalla como aproximación razonable.
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+
+        # Alto disponible para los paneles de vídeo, restando la barra de
+        # controles, la etiqueta de estado y los márgenes/título de cada panel.
+        video_area_h = (
+            screen_h - CONTROLS_HEIGHT - STATUS_HEIGHT
+            - 2 * OUTER_PAD - LABELFRAME_CHROME
+        )
+        video_area_h = max(video_area_h, 240)
+
+        # RealSense: usa toda la altura disponible, manteniendo su relación
+        # de aspecto real (4:3) → queda con un tamaño considerable.
+        rs_h = video_area_h
+        rs_w = int(rs_h * (CAM_WIDTH / CAM_HEIGHT))
+
+        # Térmica: se queda con el ancho que sobra tras el panel RealSense.
+        usable_w   = screen_w - 2 * OUTER_PAD - INNER_PAD
+        thermal_w  = max(usable_w - rs_w, 320)
+        thermal_h  = video_area_h
+
+        self.rs_display_size      = (rs_w, rs_h)
+        self.thermal_display_size = (thermal_w, thermal_h)
 
     # -----------------------------------------------------------------------
     # Interfaz gráfica
     # -----------------------------------------------------------------------
 
     def _build_ui(self) -> None:
+        style = ttk.Style()
+        style.configure("TButton", font=("Helvetica", 13), padding=(18, 10))
+        style.configure("Exit.TButton", font=("Helvetica", 13), padding=(18, 10))
+        style.configure("TLabelframe.Label", font=("Helvetica", 12, "bold"))
+        style.configure("Status.TLabel", font=("Helvetica", 12))
+
         # ── Contenedor con ambos videos, uno al lado del otro ───────────────
         videos_frame = ttk.Frame(self.root)
-        videos_frame.pack(padx=8, pady=8)
+        videos_frame.pack(padx=OUTER_PAD, pady=(OUTER_PAD, 8))
+
+        rs_w, rs_h = self.rs_display_size
+        thermal_w, thermal_h = self.thermal_display_size
 
         rs_frame = ttk.LabelFrame(videos_frame, text="RealSense")
-        rs_frame.grid(row=0, column=0, padx=(0, 8))
+        rs_frame.grid(row=0, column=0, padx=(0, INNER_PAD))
         self.video_label = ttk.Label(rs_frame)
+        self.video_label.configure(anchor="center")
         self.video_label.pack()
+        # Placeholder negro del tamaño final para que el panel no "salte"
+        self._display_frame(self.video_label, np.zeros((rs_h, rs_w, 3), dtype=np.uint8),
+                             rs_w, rs_h)
 
         thermal_frame = ttk.LabelFrame(videos_frame, text="TC001 (térmica)")
         thermal_frame.grid(row=0, column=1)
         self.thermal_label = ttk.Label(thermal_frame)
+        self.thermal_label.configure(anchor="center")
         self.thermal_label.pack()
 
         if self.thermal_camera is None:
@@ -343,24 +463,33 @@ class VisionApp:
                 text=f"TC001 no disponible\n{self._thermal_error}",
                 anchor="center",
                 justify="center",
-                width=40,
+                font=("Helvetica", 12),
+                background="#1e1e1e",
+                foreground="white",
+                width=thermal_w,
             )
+        else:
+            self._display_frame(self.thermal_label, np.zeros((thermal_h, thermal_w, 3), dtype=np.uint8),
+                                 thermal_w, thermal_h)
 
         # ── Controles (solo afectan al modo de la RealSense) ────────────────
         controls = ttk.Frame(self.root)
-        controls.pack(pady=(0, 8))
+        controls.pack(pady=(4, 4))
 
         ttk.Button(controls, text="YOLO", command=lambda: self._set_mode("yolo")).grid(
-            row=0, column=0, padx=4)
+            row=0, column=0, padx=8)
         ttk.Button(controls, text="QR", command=lambda: self._set_mode("qr")).grid(
-            row=0, column=1, padx=4)
+            row=0, column=1, padx=8)
         ttk.Button(controls, text="Movimiento", command=lambda: self._set_mode("movement")).grid(
-            row=0, column=2, padx=4)
+            row=0, column=2, padx=8)
         ttk.Button(controls, text="Detener", command=lambda: self._set_mode(None)).grid(
-            row=0, column=3, padx=4)
+            row=0, column=3, padx=8)
+        ttk.Button(controls, text="Salir", style="Exit.TButton",
+                   command=self._on_close).grid(row=0, column=4, padx=(24, 0))
 
         self.status_var = tk.StringVar(value="Modo: ninguno (idle)")
-        ttk.Label(self.root, textvariable=self.status_var).pack(pady=(0, 8))
+        ttk.Label(self.root, textvariable=self.status_var, style="Status.TLabel").pack(
+            pady=(0, 8))
 
     # -----------------------------------------------------------------------
     # Gestión de modos / modelos (RealSense)
@@ -424,17 +553,37 @@ class VisionApp:
             elif self.active_mode == "movement":
                 frame = self._process_movement(frame)
 
-            self._display_frame(self.video_label, frame)
+            self._display_frame(self.video_label, frame, *self.rs_display_size)
 
         # ── TC001 (heatmap ya viene procesado desde el hilo de captura) ─────
         if self.thermal_camera is not None:
             thermal_frame = self.thermal_camera.get_latest_frame()
             if thermal_frame is not None:
-                self._display_frame(self.thermal_label, thermal_frame)
+                self._display_frame(self.thermal_label, thermal_frame, *self.thermal_display_size)
 
         self.root.after(GUI_REFRESH_MS, self._update_frame)
 
-    def _display_frame(self, label: ttk.Label, frame: np.ndarray) -> None:
+    @staticmethod
+    def _letterbox(frame: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
+        """Escala `frame` para que quepa en target_w x target_h sin deformarlo,
+        rellenando con negro el sobrante (letterbox) en vez de estirar."""
+        h, w = frame.shape[:2]
+        if w == 0 or h == 0:
+            return np.zeros((target_h, target_w, 3), dtype=np.uint8)
+
+        scale = min(target_w / w, target_h / h)
+        new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
+        resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+        x_off = (target_w - new_w) // 2
+        y_off = (target_h - new_h) // 2
+        canvas[y_off:y_off + new_h, x_off:x_off + new_w] = resized
+        return canvas
+
+    def _display_frame(self, label: ttk.Label, frame: np.ndarray,
+                        target_w: int, target_h: int) -> None:
+        frame = self._letterbox(frame, target_w, target_h)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(rgb)
         imgtk = ImageTk.PhotoImage(image=img)
