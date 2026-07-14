@@ -301,14 +301,6 @@ class MazeNode(LifecycleNode):
         return float(x), float(y), float(z)
 
     def pixel_to_yaw(self, u: int) -> float:
-        """
-        Ángulo horizontal (yaw) en grados desde el centro óptico de la cámara.
-
-        Retorna:
-            yaw_deg > 0  →  objeto a la DERECHA del centro óptico
-            yaw_deg < 0  →  objeto a la IZQUIERDA del centro óptico
-            0.0          →  si los intrínsecos aún no están disponibles
-        """
         if self.fx is None or self.cx is None:
             return 0.0
         return math.degrees(math.atan2(u - self.cx, self.fx))
